@@ -8,24 +8,45 @@ export default async function handler(req, res) {
   }
 
   try {
-    const body = req.body || {};
 
-    const cep = body.cep?.replace(/\D/g, '');
+    /* GERA TOKEN */
+    const authResponse = await fetch('https://sandbox.melhorenvio.com.br/oauth/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        grant_type: 'client_credentials',
+        client_id: process.env.MELHOR_ENVIO_CLIENT_ID,
+        client_secret: process.env.MELHOR_ENVIO_CLIENT_SECRET
+      })
+    });
 
-    if (!cep) {
+    const authData = await authResponse.json();
+
+    console.log('TOKEN:', authData);
+
+    const token = authData.access_token;
+
+    if (!token) {
       return res.status(400).json({
         success: false,
-        message: 'CEP obrigatório'
+        auth_error: authData
       });
     }
 
-    const response = await fetch('https://www.melhorenvio.com.br/api/v2/me/shipment/calculate', {
+    /* CEP */
+    const body = req.body || {};
+    const cep = body.cep?.replace(/\D/g, '');
+
+    /* CALCULA FRETE */
+    const response = await fetch('https://sandbox.melhorenvio.com.br/api/v2/me/shipment/calculate', {
       method: 'POST',
       headers: {
         'Accept': 'application/json',
         'Content-Type': 'application/json',
-        'User-Agent': 'NEWER STORE',
-        'Authorization': `Bearer ${process.env.MELHOR_ENVIO_CLIENT_SECRET}`
+        'Authorization': `Bearer ${token}`,
+        'User-Agent': 'NEWER STORE'
       },
       body: JSON.stringify({
         from: {
@@ -50,15 +71,19 @@ export default async function handler(req, res) {
 
     const data = await response.json();
 
+    console.log('FRETE:', data);
+
     return res.status(200).json({
       success: true,
       options: data
     });
 
   } catch (error) {
+
     return res.status(500).json({
       success: false,
       error: error.message
     });
+
   }
 }
