@@ -1,20 +1,18 @@
 export default async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', 'https://newera-shop-7780.myshopify.com');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
   try {
     if (req.method !== 'POST') {
-      return res.status(200).json({
-        success: false,
-        message: 'Use POST para criar pagamento.'
-      });
+      return res.status(405).json({ success: false, message: 'Use POST.' });
     }
 
     const body = req.body || {};
-
-    if (!body.items || !Array.isArray(body.items) || body.items.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Nenhum item recebido.'
-      });
-    }
 
     const response = await fetch('https://api.mercadopago.com/checkout/preferences', {
       method: 'POST',
@@ -43,10 +41,7 @@ export default async function handler(req, res) {
     const data = await response.json();
 
     if (!response.ok) {
-      return res.status(400).json({
-        success: false,
-        mercado_pago_error: data
-      });
+      return res.status(400).json({ success: false, mercado_pago_error: data });
     }
 
     return res.status(200).json({
@@ -55,9 +50,6 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    return res.status(500).json({ success: false, error: error.message });
   }
 }
