@@ -1,39 +1,53 @@
 export default async function handler(req, res) {
   try {
-    const body = req.body;
+    if (req.method !== 'POST') {
+      return res.status(200).json({
+        success: false,
+        message: 'Use POST para criar pagamento.'
+      });
+    }
 
-    const response = await fetch(
-      'https://api.mercadopago.com/checkout/preferences',
-      {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${process.env.MP_ACCESS_TOKEN}`,
-          'Content-Type': 'application/json'
+    const body = req.body || {};
+
+    if (!body.items || !Array.isArray(body.items) || body.items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Nenhum item recebido.'
+      });
+    }
+
+    const response = await fetch('https://api.mercadopago.com/checkout/preferences', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        items: body.items,
+        payer: {
+          name: body.name || '',
+          email: body.email || ''
         },
-        body: JSON.stringify({
-          items: body.items,
-
-          payer: {
-            name: body.name,
-            email: body.email
-          },
-
-          payment_methods: {
-            installments: 6
-          },
-
-          back_urls: {
-            success: 'https://newera-shop-7780.myshopify.com/pages/checkout?status=approved',
-            failure: 'https://newera-shop-7780.myshopify.com/pages/checkout?status=failed',
-            pending: 'https://newera-shop-7780.myshopify.com/pages/checkout?status=pending'
-          },
-
-          auto_return: 'approved'
-        })
-      }
-    );
+        payment_methods: {
+          installments: 6
+        },
+        back_urls: {
+          success: 'https://newera-shop-7780.myshopify.com/pages/checkout?status=approved',
+          failure: 'https://newera-shop-7780.myshopify.com/pages/checkout?status=failed',
+          pending: 'https://newera-shop-7780.myshopify.com/pages/checkout?status=pending'
+        },
+        auto_return: 'approved'
+      })
+    });
 
     const data = await response.json();
+
+    if (!response.ok) {
+      return res.status(400).json({
+        success: false,
+        mercado_pago_error: data
+      });
+    }
 
     return res.status(200).json({
       success: true,
