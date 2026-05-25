@@ -10,7 +10,7 @@ export default async function handler(req, res) {
   try {
 
     /* GERA TOKEN */
-    const authResponse = await fetch('https://sandbox.melhorenvio.com.br/oauth/token', {
+    const authResponse = await fetch('https://melhorenvio.com.br/oauth/token', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -40,7 +40,7 @@ export default async function handler(req, res) {
     const cep = body.cep?.replace(/\D/g, '');
 
     /* CALCULA FRETE */
-    const response = await fetch('https://sandbox.melhorenvio.com.br/api/v2/me/shipment/calculate', {
+    const response = await fetch('https://melhorenvio.com.br/api/v2/me/shipment/calculate', {
       method: 'POST',
       headers: {
         'Accept': 'application/json',
