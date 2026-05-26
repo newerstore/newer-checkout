@@ -2,15 +2,30 @@ export default async function handler(req, res) {
 
   try {
 
-    console.log('WEBHOOK:', req.body);
+    console.log('WEBHOOK BODY:', JSON.stringify(req.body, null, 2));
 
-    const paymentId = req.body?.data?.id;
+    const body = req.body || {};
+
+    // PEGA PAYMENT ID EM QUALQUER FORMATO
+    const paymentId =
+      body?.data?.id ||
+      body?.resource?.split('/').pop() ||
+      body?.id;
 
     if (!paymentId) {
-      return res.status(200).json({ received: true });
+
+      console.log('SEM PAYMENT ID');
+
+      return res.status(200).json({
+        success: false,
+        message: 'Sem payment id'
+      });
+
     }
 
-    // BUSCA PAGAMENTO NO MP
+    console.log('PAYMENT ID:', paymentId);
+
+    // BUSCA PAGAMENTO REAL
     const paymentResponse = await fetch(
       `https://api.mercadopago.com/v1/payments/${paymentId}`,
       {
@@ -22,21 +37,54 @@ export default async function handler(req, res) {
 
     const payment = await paymentResponse.json();
 
-    console.log('PAYMENT DATA:', payment);
+    console.log('PAYMENT:', JSON.stringify(payment, null, 2));
 
-    // SÓ CONTINUA SE APROVADO
+    // IGNORA NÃO APROVADOS
     if (payment.status !== 'approved') {
+
+      console.log('PAGAMENTO NÃO APROVADO');
+
       return res.status(200).json({
         success: true,
         ignored: true
       });
+
     }
 
-    // CRIA PEDIDO NA SHOPIFY
+    // EVITA DUPLICAR PEDIDOS
+    const existingOrdersResponse = await fetch(
+      `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/${process.env.SHOPIFY_API_VERSION}/orders.json?status=any`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN
+        }
+      }
+    );
+
+    const existingOrders = await existingOrdersResponse.json();
+
+    const alreadyExists = existingOrders.orders?.some(order =>
+      order.note &&
+      order.note.includes(String(payment.id))
+    );
+
+    if (alreadyExists) {
+
+      console.log('PEDIDO JÁ EXISTE');
+
+      return res.status(200).json({
+        success: true,
+        duplicated: true
+      });
+
+    }
+
+    // CRIA PEDIDO SHOPIFY
     const orderResponse = await fetch(
       `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/${process.env.SHOPIFY_API_VERSION}/orders.json`,
       {
         method: 'POST',
+
         headers: {
           'Content-Type': 'application/json',
           'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN
@@ -57,13 +105,7 @@ export default async function handler(req, res) {
                 quantity: 1,
                 price: payment.transaction_amount || 0
               }
-            ],
-
-            billing_address: {
-              first_name: payment.payer?.first_name || '',
-              last_name: payment.payer?.last_name || '',
-              phone: payment.payer?.phone?.number || ''
-            }
+            ]
           }
         })
       }
@@ -71,7 +113,7 @@ export default async function handler(req, res) {
 
     const orderData = await orderResponse.json();
 
-    console.log('SHOPIFY ORDER:', orderData);
+    console.log('SHOPIFY ORDER:', JSON.stringify(orderData, null, 2));
 
     return res.status(200).json({
       success: true,
@@ -80,7 +122,7 @@ export default async function handler(req, res) {
 
   } catch (error) {
 
-    console.log(error);
+    console.log('ERRO WEBHOOK:', error);
 
     return res.status(500).json({
       success: false,
