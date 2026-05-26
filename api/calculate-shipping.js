@@ -24,7 +24,7 @@ export default async function handler(req, res) {
       headers: {
         'Accept': 'application/json',
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.MELHOR_ENVIO_TOKEN}`,
+        'Authorization': `Bearer ${process.env.MELHOR_ENVIO_TOKEN.trim()}`,
         'User-Agent': 'NEWER STORE'
       },
       body: JSON.stringify({
