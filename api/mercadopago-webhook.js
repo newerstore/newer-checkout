@@ -1,8 +1,5 @@
 export default async function handler(req, res) {
   try {
-    console.log('WEBHOOK BODY:', JSON.stringify(req.body || {}, null, 2));
-    console.log('WEBHOOK QUERY:', JSON.stringify(req.query || {}, null, 2));
-
     const body = req.body || {};
     const query = req.query || {};
 
@@ -29,6 +26,50 @@ export default async function handler(req, res) {
       return res.status(200).json({ success: true, ignored: true, status: payment.status });
     }
 
+    const meta = payment.metadata || {};
+
+    let shopifyItems = [];
+
+    try {
+      shopifyItems = JSON.parse(meta.shopify_items || '[]');
+    } catch (e) {
+      shopifyItems = [];
+    }
+
+    const productLineItems = shopifyItems.length
+      ? shopifyItems.map(function (item) {
+          return {
+            title: item.title || 'Produto NEWER',
+            quantity: Number(item.quantity || 1),
+            price: Number(item.price || 0).toFixed(2),
+            variant_title: item.variant_title || undefined,
+            requires_shipping: true,
+            taxable: false
+          };
+        })
+      : [
+          {
+            title: 'Pedido NEWER',
+            quantity: 1,
+            price: Number(payment.transaction_amount || 0).toFixed(2),
+            requires_shipping: true,
+            taxable: false
+          }
+        ];
+
+    const shippingPrice = Number(meta.shipping_price || 0);
+
+    const lineItems = [
+      ...productLineItems,
+      {
+        title: meta.shipping_name ? `Frete - ${meta.shipping_name}` : 'Frete',
+        quantity: 1,
+        price: shippingPrice.toFixed(2),
+        requires_shipping: false,
+        taxable: false
+      }
+    ];
+
     const existingOrdersResponse = await fetch(
       `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/${process.env.SHOPIFY_API_VERSION}/orders.json?status=any&limit=50`,
       {
@@ -48,25 +89,58 @@ export default async function handler(req, res) {
       return res.status(200).json({ success: true, duplicated: true });
     }
 
+    const customerName = meta.customer_name || payment.payer?.first_name || '';
+    const nameParts = customerName.trim().split(' ');
+    const firstName = nameParts.shift() || customerName || 'Cliente';
+    const lastName = nameParts.join(' ') || '.';
+
+    const address = {
+      first_name: firstName,
+      last_name: lastName,
+      address1: `${meta.customer_address || ''}, ${meta.customer_number || ''}`.trim(),
+      address2: meta.customer_complement || '',
+      city: meta.customer_city || '',
+      province: meta.customer_state || '',
+      country: 'Brazil',
+      zip: meta.customer_cep || '',
+      phone: meta.customer_phone || ''
+    };
+
+    const noteLines = [
+      `Mercado Pago Payment ID: ${payment.id}`,
+      `Forma de pagamento: ${payment.payment_method_id || ''}`,
+      `Status MP: ${payment.status || ''}`,
+      `Cliente: ${meta.customer_name || ''}`,
+      `Telefone: ${meta.customer_phone || ''}`,
+      `CEP: ${meta.customer_cep || ''}`,
+      `Endereço: ${meta.customer_address || ''}, ${meta.customer_number || ''}`,
+      `Complemento: ${meta.customer_complement || ''}`,
+      `Bairro: ${meta.customer_district || ''}`,
+      `Cidade/UF: ${meta.customer_city || ''}/${meta.customer_state || ''}`,
+      `Frete: ${meta.shipping_name || ''} - R$ ${shippingPrice.toFixed(2)}`,
+      `Cupom: ${meta.coupon_code || ''}`,
+      `Desconto: R$ ${Number(meta.discount_amount || 0).toFixed(2)}`
+    ];
+
     const amount = Number(payment.transaction_amount || 0).toFixed(2);
 
     const orderPayload = {
       order: {
-        email: payment.payer?.email || '',
+        email: meta.customer_email || payment.payer?.email || '',
         financial_status: 'paid',
         fulfillment_status: null,
-        note: `Mercado Pago Payment ID: ${payment.id}`,
+        note: noteLines.join('\n'),
         tags: 'Mercado Pago, NEWER Checkout',
         currency: 'BRL',
-        line_items: [
-          {
-            title: 'Pedido NEWER',
-            quantity: 1,
-            price: amount,
-            requires_shipping: true,
-            taxable: false
-          }
-        ],
+        line_items: lineItems,
+        shipping_address: address,
+        billing_address: address,
+        customer: {
+          first_name: firstName,
+          last_name: lastName,
+          email: meta.customer_email || payment.payer?.email || '',
+          phone: meta.customer_phone || ''
+        },
         transactions: [
           {
             kind: 'sale',
