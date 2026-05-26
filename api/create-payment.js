@@ -30,7 +30,7 @@ export default async function handler(req, res) {
           installments: 6
         },
         back_urls: {
-          success: 'https://newera-shop-7780.myshopify.com/pages/checkout?status=approved',
+          success: 'https://newera-shop-7780.myshopify.com/pages/pedido-confirmado',
           failure: 'https://newera-shop-7780.myshopify.com/pages/checkout?status=failed',
           pending: 'https://newera-shop-7780.myshopify.com/pages/checkout?status=pending'
         },
