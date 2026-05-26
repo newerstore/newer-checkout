@@ -45,9 +45,10 @@ export default async function handler(req, res) {
     }
 
     return res.status(200).json({
-      success: true,
-      init_point: data.init_point
-    });
+  success: true,
+  init_point: data.init_point,
+  preference_id: data.id
+});
 
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
