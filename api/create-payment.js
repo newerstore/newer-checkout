@@ -14,6 +14,24 @@ export default async function handler(req, res) {
 
     const body = req.body || {};
 
+    const metadata = {
+      customer_name: body.name || '',
+      customer_email: body.email || '',
+      customer_phone: body.phone || '',
+      customer_cep: body.cep || '',
+      customer_address: body.address || '',
+      customer_number: body.number || '',
+      customer_complement: body.complement || '',
+      customer_district: body.district || '',
+      customer_city: body.city || '',
+      customer_state: body.state || '',
+      shipping_name: body.shipping_name || '',
+      shipping_price: body.shipping_price || 0,
+      coupon_code: body.coupon_code || '',
+      discount_amount: body.discount_amount || 0,
+      shopify_items: JSON.stringify(body.shopify_items || [])
+    };
+
     const response = await fetch('https://api.mercadopago.com/checkout/preferences', {
       method: 'POST',
       headers: {
@@ -26,14 +44,15 @@ export default async function handler(req, res) {
           name: body.name || '',
           email: body.email || ''
         },
+        metadata,
         payment_methods: {
           installments: 6
         },
         back_urls: {
-  success: 'https://newera-shop-7780.myshopify.com/pages/pedido-confirmado',
-  failure: 'https://newera-shop-7780.myshopify.com/pages/checkout?status=failed',
-  pending: 'https://newera-shop-7780.myshopify.com/pages/aguardando-pix'
-},
+          success: 'https://newera-shop-7780.myshopify.com/pages/pedido-confirmado',
+          failure: 'https://newera-shop-7780.myshopify.com/pages/checkout?status=failed',
+          pending: 'https://newera-shop-7780.myshopify.com/pages/aguardando-pix'
+        },
         auto_return: 'approved'
       })
     });
@@ -45,10 +64,10 @@ export default async function handler(req, res) {
     }
 
     return res.status(200).json({
-  success: true,
-  init_point: data.init_point,
-  preference_id: data.id
-});
+      success: true,
+      init_point: data.init_point,
+      preference_id: data.id
+    });
 
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
