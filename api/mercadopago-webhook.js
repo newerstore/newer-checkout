@@ -24,6 +24,87 @@ function normalizeProperties(properties) {
   return [];
 }
 
+function cleanText(value) {
+  if (value === undefined || value === null) return '';
+  return String(value).trim();
+}
+
+function onlyDigits(value) {
+  return cleanText(value).replace(/\D/g, '');
+}
+
+function pickFirst() {
+  for (const value of arguments) {
+    const cleaned = cleanText(value);
+    if (cleaned) return cleaned;
+  }
+  return '';
+}
+
+function looksLikeShippingName(value) {
+  const text = cleanText(value).toLowerCase();
+  if (!text) return false;
+
+  return (
+    text.includes('frete') ||
+    text.includes('sedex') ||
+    text.includes('pac') ||
+    text.includes('envio') ||
+    text.includes('entrega') ||
+    text.includes('dias úteis') ||
+    text.includes('dias uteis')
+  );
+}
+
+function splitCustomerName(customerName) {
+  let name = cleanText(customerName);
+
+  if (!name || looksLikeShippingName(name)) {
+    name = 'Cliente NEWER';
+  }
+
+  const parts = name.split(/\s+/).filter(Boolean);
+  const firstName = parts.shift() || 'Cliente';
+  const lastName = parts.join(' ') || 'NEWER';
+
+  return { firstName, lastName, fullName: `${firstName} ${lastName}`.trim() };
+}
+
+function normalizeState(value) {
+  const state = cleanText(value);
+  const map = {
+    AC: 'Acre',
+    AL: 'Alagoas',
+    AP: 'Amapá',
+    AM: 'Amazonas',
+    BA: 'Bahia',
+    CE: 'Ceará',
+    DF: 'Distrito Federal',
+    ES: 'Espírito Santo',
+    GO: 'Goiás',
+    MA: 'Maranhão',
+    MT: 'Mato Grosso',
+    MS: 'Mato Grosso do Sul',
+    MG: 'Minas Gerais',
+    PA: 'Pará',
+    PB: 'Paraíba',
+    PR: 'Paraná',
+    PE: 'Pernambuco',
+    PI: 'Piauí',
+    RJ: 'Rio de Janeiro',
+    RN: 'Rio Grande do Norte',
+    RS: 'Rio Grande do Sul',
+    RO: 'Rondônia',
+    RR: 'Roraima',
+    SC: 'Santa Catarina',
+    SP: 'São Paulo',
+    SE: 'Sergipe',
+    TO: 'Tocantins'
+  };
+
+  return map[state.toUpperCase()] || state;
+}
+
 export default async function handler(req, res) {
   try {
     const body = req.body || {};
@@ -53,6 +134,8 @@ export default async function handler(req, res) {
     }
 
     const meta = payment.metadata || {};
+    const payer = payment.payer || {};
+    const additionalPayer = payment.additional_info?.payer || {};
 
     let shopifyItems = [];
 
@@ -121,34 +204,127 @@ export default async function handler(req, res) {
       return res.status(200).json({ success: true, duplicated: true });
     }
 
-    const customerName = meta.customer_name || payment.payer?.first_name || '';
-    const nameParts = customerName.trim().split(' ');
-    const firstName = nameParts.shift() || customerName || 'Cliente';
-    const lastName = nameParts.join(' ') || '.';
+    /*
+      IMPORTANTE:
+      Esta correção mexe apenas no webhook que cria o pedido na Shopify.
+      Não altera cálculo, pagamento, checkout, cupom, frete ou Mercado Pago.
+      A ideia é só salvar os dados certos no pedido Shopify.
+    */
+
+    const customerNameRaw = pickFirst(
+      meta.customer_name,
+      meta.name,
+      meta.nome,
+      payer.first_name && payer.last_name ? `${payer.first_name} ${payer.last_name}` : '',
+      additionalPayer.first_name && additionalPayer.last_name ? `${additionalPayer.first_name} ${additionalPayer.last_name}` : '',
+      payer.first_name,
+      additionalPayer.first_name
+    );
+
+    const { firstName, lastName, fullName } = splitCustomerName(customerNameRaw);
+
+    const customerEmail = pickFirst(
+      meta.customer_email,
+      meta.email,
+      payer.email,
+      additionalPayer.email
+    );
+
+    const customerPhone = pickFirst(
+      meta.customer_phone,
+      meta.phone,
+      meta.telefone,
+      payer.phone?.area_code && payer.phone?.number ? `${payer.phone.area_code}${payer.phone.number}` : '',
+      payer.phone?.number,
+      additionalPayer.phone?.area_code && additionalPayer.phone?.number ? `${additionalPayer.phone.area_code}${additionalPayer.phone.number}` : '',
+      additionalPayer.phone?.number
+    );
+
+    const customerCep = pickFirst(
+      meta.customer_cep,
+      meta.cep,
+      meta.zip,
+      meta.postal_code,
+      additionalPayer.address?.zip_code
+    );
+
+    const customerAddress = pickFirst(
+      meta.customer_address,
+      meta.address,
+      meta.address1,
+      meta.endereco,
+      meta.rua,
+      meta.street_name,
+      additionalPayer.address?.street_name
+    );
+
+    const customerNumber = pickFirst(
+      meta.customer_number,
+      meta.number,
+      meta.numero,
+      meta.street_number,
+      additionalPayer.address?.street_number
+    );
+
+    const customerComplement = pickFirst(
+      meta.customer_complement,
+      meta.complement,
+      meta.complemento,
+      meta.address2
+    );
+
+    const customerDistrict = pickFirst(
+      meta.customer_district,
+      meta.district,
+      meta.neighborhood,
+      meta.bairro
+    );
+
+    const customerCity = pickFirst(
+      meta.customer_city,
+      meta.city,
+      meta.cidade,
+      additionalPayer.address?.city_name
+    );
+
+    const customerState = normalizeState(pickFirst(
+      meta.customer_state,
+      meta.state,
+      meta.uf,
+      meta.province,
+      additionalPayer.address?.state_name
+    ));
+
+    const address1 = [customerAddress, customerNumber].filter(Boolean).join(', ');
+
+    const address2 = [customerComplement, customerDistrict]
+      .filter(Boolean)
+      .join(' - ');
 
     const address = {
       first_name: firstName,
       last_name: lastName,
-      address1: `${meta.customer_address || ''}, ${meta.customer_number || ''}`.trim(),
-      address2: meta.customer_complement || '',
-      city: meta.customer_city || '',
-      province: meta.customer_state || '',
+      name: fullName,
+      address1,
+      address2,
+      city: customerCity,
+      province: customerState,
       country: 'Brazil',
-      zip: meta.customer_cep || '',
-      phone: meta.customer_phone || ''
+      zip: onlyDigits(customerCep),
+      phone: customerPhone
     };
 
     const noteLines = [
       `Mercado Pago Payment ID: ${payment.id}`,
       `Forma de pagamento: ${payment.payment_method_id || ''}`,
       `Status MP: ${payment.status || ''}`,
-      `Cliente: ${meta.customer_name || ''}`,
-      `Telefone: ${meta.customer_phone || ''}`,
-      `CEP: ${meta.customer_cep || ''}`,
-      `Endereço: ${meta.customer_address || ''}, ${meta.customer_number || ''}`,
-      `Complemento: ${meta.customer_complement || ''}`,
-      `Bairro: ${meta.customer_district || ''}`,
-      `Cidade/UF: ${meta.customer_city || ''}/${meta.customer_state || ''}`,
+      `Cliente: ${fullName}`,
+      `E-mail: ${customerEmail}`,
+      `Telefone: ${customerPhone}`,
+      `CEP: ${customerCep}`,
+      `Endereço: ${address1}`,
+      `Complemento/Bairro: ${address2}`,
+      `Cidade/UF: ${customerCity}/${customerState}`,
       `Frete: ${meta.shipping_name || ''} - R$ ${shippingPrice.toFixed(2)}`,
       `Cupom: ${meta.coupon_code || ''}`,
       `Desconto: R$ ${Number(meta.discount_amount || 0).toFixed(2)}`
@@ -158,7 +334,8 @@ export default async function handler(req, res) {
 
     const orderPayload = {
       order: {
-        email: meta.customer_email || payment.payer?.email || '',
+        email: customerEmail,
+        phone: customerPhone,
         financial_status: 'paid',
         fulfillment_status: null,
         note: noteLines.join('\n'),
@@ -177,8 +354,8 @@ export default async function handler(req, res) {
         customer: {
           first_name: firstName,
           last_name: lastName,
-          email: meta.customer_email || payment.payer?.email || '',
-          phone: meta.customer_phone || ''
+          email: customerEmail,
+          phone: customerPhone
         },
         transactions: [
           {
