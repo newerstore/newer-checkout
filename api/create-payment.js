@@ -17,6 +17,26 @@ function setCors(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
+function pick(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      return String(value).trim();
+    }
+  }
+  return '';
+}
+
+function pickNumber(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      const normalized = String(value).replace(',', '.').trim();
+      const number = Number(normalized);
+      if (!Number.isNaN(number)) return number;
+    }
+  }
+  return 0;
+}
+
 export default async function handler(req, res) {
   setCors(req, res);
 
@@ -32,19 +52,112 @@ export default async function handler(req, res) {
     const body = req.body || {};
     const shopifyItems = body.shopify_items || body.cart_items || [];
 
+    const customerName = pick(
+      body.name,
+      body.nome,
+      body.full_name,
+      body.customer_name,
+      body.customer?.name,
+      body.customer?.full_name,
+      body.shipping_address?.name
+    );
+
+    const customerEmail = pick(
+      body.email,
+      body.customer_email,
+      body.customer?.email
+    );
+
+    const customerPhone = pick(
+      body.phone,
+      body.telefone,
+      body.whatsapp,
+      body.customer_phone,
+      body.customer?.phone,
+      body.shipping_address?.phone
+    );
+
+    const customerCep = pick(
+      body.cep,
+      body.zip,
+      body.postal_code,
+      body.customer_cep,
+      body.shipping_address?.zip
+    );
+
+    const customerAddress = pick(
+      body.address,
+      body.endereco,
+      body.street,
+      body.customer_address,
+      body.shipping_address?.address1
+    );
+
+    const customerNumber = pick(
+      body.number,
+      body.numero,
+      body.customer_number,
+      body.shipping_address?.number
+    );
+
+    const customerComplement = pick(
+      body.complement,
+      body.complemento,
+      body.customer_complement,
+      body.shipping_address?.address2
+    );
+
+    const customerDistrict = pick(
+      body.district,
+      body.neighborhood,
+      body.bairro,
+      body.customer_district,
+      body.shipping_address?.neighborhood
+    );
+
+    const customerCity = pick(
+      body.city,
+      body.cidade,
+      body.customer_city,
+      body.shipping_address?.city
+    );
+
+    const customerState = pick(
+      body.state,
+      body.uf,
+      body.estado,
+      body.customer_state,
+      body.shipping_address?.province,
+      body.shipping_address?.province_code
+    );
+
+    const shippingName = pick(
+      body.shipping_name,
+      body.shipping?.name,
+      body.shipping_method,
+      body.freight_name
+    );
+
+    const shippingPrice = pickNumber(
+      body.shipping_price,
+      body.shipping?.price,
+      body.frete,
+      body.freight_price
+    );
+
     const metadata = {
-      customer_name: body.name || '',
-      customer_email: body.email || '',
-      customer_phone: body.phone || '',
-      customer_cep: body.cep || '',
-      customer_address: body.address || '',
-      customer_number: body.number || '',
-      customer_complement: body.complement || '',
-      customer_district: body.district || body.neighborhood || '',
-      customer_city: body.city || '',
-      customer_state: body.state || '',
-      shipping_name: body.shipping_name || '',
-      shipping_price: body.shipping_price || 0,
+      customer_name: customerName,
+      customer_email: customerEmail,
+      customer_phone: customerPhone,
+      customer_cep: customerCep,
+      customer_address: customerAddress,
+      customer_number: customerNumber,
+      customer_complement: customerComplement,
+      customer_district: customerDistrict,
+      customer_city: customerCity,
+      customer_state: customerState,
+      shipping_name: shippingName,
+      shipping_price: shippingPrice,
       coupon_code: body.coupon_code || '',
       discount_amount: body.discount_amount || 0,
       subtotal_before_discount: body.subtotal_before_discount || 0,
@@ -61,18 +174,21 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         items: body.items,
         payer: {
-          name: body.name || '',
-          email: body.email || ''
+          name: customerName,
+          email: customerEmail,
+          phone: {
+            number: customerPhone
+          }
         },
         metadata,
         payment_methods: {
           installments: 6
         },
         back_urls: {
-  success: 'https://newer-store.com/pages/pedido-confirmado',
-  failure: 'https://newer-store.com/pages/checkout?status=failed',
-  pending: 'https://newer-store.com/pages/pedido-confirmado'
-},
+          success: 'https://newer-store.com/pages/pedido-confirmado',
+          failure: 'https://newer-store.com/pages/checkout?status=failed',
+          pending: 'https://newer-store.com/pages/pedido-confirmado'
+        },
         auto_return: 'approved'
       })
     });
