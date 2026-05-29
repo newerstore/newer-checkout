@@ -163,6 +163,22 @@ export default async function handler(req, res) {
         fulfillment_status: null,
         note: noteLines.join('\n'),
         tags: 'Mercado Pago, NEWER Checkout',
+        note_attributes: [
+          { name: 'customer_name', value: meta.customer_name || '' },
+          { name: 'customer_email', value: meta.customer_email || payment.payer?.email || '' },
+          { name: 'customer_phone', value: meta.customer_phone || '' },
+          { name: 'customer_cep', value: meta.customer_cep || '' },
+          { name: 'customer_address', value: meta.customer_address || '' },
+          { name: 'customer_number', value: meta.customer_number || '' },
+          { name: 'customer_complement', value: meta.customer_complement || '' },
+          { name: 'customer_district', value: meta.customer_district || '' },
+          { name: 'customer_city', value: meta.customer_city || '' },
+          { name: 'customer_state', value: meta.customer_state || '' },
+          { name: 'shipping_name', value: meta.shipping_name || '' },
+          { name: 'shipping_price', value: shippingPrice.toFixed(2) },
+          { name: 'coupon_code', value: meta.coupon_code || '' },
+          { name: 'discount_amount', value: Number(meta.discount_amount || 0).toFixed(2) }
+        ],
         currency: 'BRL',
         line_items: productLineItems,
         shipping_lines: [
