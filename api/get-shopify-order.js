@@ -89,8 +89,15 @@ export default async function handler(req, res) {
     }
 
     if (!shopifyOrder) {
-      return res.status(404).json({ error: 'Pedido não encontrado na Shopify.' });
-    }
+  return res.status(404).json({ error: 'Pedido não encontrado na Shopify.' });
+}
+
+// BUSCAR O PEDIDO COMPLETO
+const fullOrderData = await shopifyGet(
+  `/orders/${shopifyOrder.id}.json?status=any`
+);
+
+shopifyOrder = fullOrderData.order;
 
     // Validação opcional caso a página envie email/telefone.
     const orderEmail = String(
