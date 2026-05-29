@@ -1,6 +1,6 @@
 // /api/get-shopify-order.js
 // Endpoint seguro para buscar os dados REAIS do pedido na Shopify
-// Coloque este arquivo na pasta /api do projeto na Vercel.
+// Corrigido para buscar também o cadastro completo do cliente quando o pedido vier sem nome/e-mail/endereço.
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', 'https://newer-store.com');
@@ -70,12 +70,8 @@ export default async function handler(req, res) {
       shopifyOrder = data.order;
     } else {
       const cleanOrder = String(order).replace('#', '').trim();
-
-      // Primeiro tenta pelo nome exato "#3141"
       let data = await shopifyGet(`/orders.json?status=any&name=%23${encodeURIComponent(cleanOrder)}&limit=1`);
 
-      // Fallback: algumas lojas/API podem falhar no filtro name.
-      // Então busca os últimos pedidos e filtra manualmente.
       if (!data.orders || !data.orders.length) {
         data = await shopifyGet(`/orders.json?status=any&limit=250&order=created_at desc`);
         shopifyOrder = (data.orders || []).find((o) => {
@@ -89,50 +85,47 @@ export default async function handler(req, res) {
     }
 
     if (!shopifyOrder) {
-  return res.status(404).json({ error: 'Pedido não encontrado na Shopify.' });
-}
-
-// BUSCAR O PEDIDO COMPLETO
-const fullOrderData = await shopifyGet(
-  `/orders/${shopifyOrder.id}.json?status=any`
-);
-
-shopifyOrder = fullOrderData.order;
-
-    // Validação opcional caso a página envie email/telefone.
-    const orderEmail = String(
-      shopifyOrder.email ||
-      shopifyOrder.contact_email ||
-      shopifyOrder.customer?.email ||
-      ''
-    ).toLowerCase().trim();
-
-    const orderPhone = String(
-      shopifyOrder.phone ||
-      shopifyOrder.customer?.phone ||
-      shopifyOrder.shipping_address?.phone ||
-      shopifyOrder.billing_address?.phone ||
-      ''
-    ).replace(/\D/g, '');
-
-    const requestEmail = String(email || '').toLowerCase().trim();
-    const requestPhone = String(phone || '').replace(/\D/g, '');
-
-    if (requestEmail && orderEmail && requestEmail !== orderEmail) {
-      return res.status(403).json({ error: 'E-mail não confere com o pedido.' });
+      return res.status(404).json({ error: 'Pedido não encontrado na Shopify.' });
     }
 
-    if (requestPhone && orderPhone && !orderPhone.endsWith(requestPhone.slice(-8))) {
-      return res.status(403).json({ error: 'Telefone não confere com o pedido.' });
+    // Depois de encontrar o pedido na lista, busca o pedido completo pelo ID.
+    // A listagem de pedidos pode vir sem dados completos de cliente/endereço.
+    try {
+      const fullOrderData = await shopifyGet(`/orders/${shopifyOrder.id}.json?status=any`);
+      if (fullOrderData.order) shopifyOrder = fullOrderData.order;
+    } catch (e) {
+      console.log('Não foi possível buscar pedido completo:', e.message);
     }
+
+    function firstValue(...values) {
+      for (const value of values) {
+        if (value !== undefined && value !== null && String(value).trim() !== '') {
+          return String(value).trim();
+        }
+      }
+      return '';
+    }
+
+    // Busca cadastro completo do cliente quando o pedido vier sem dados pessoais.
+    let fullCustomer = shopifyOrder.customer || {};
+    if (shopifyOrder.customer?.id) {
+      try {
+        const customerData = await shopifyGet(`/customers/${shopifyOrder.customer.id}.json`);
+        if (customerData.customer) fullCustomer = customerData.customer;
+      } catch (e) {
+        console.log('Não foi possível buscar cliente completo:', e.message);
+      }
+    }
+
+    const customerDefaultAddress = fullCustomer.default_address || {};
+    const customerAddressFromList = Array.isArray(fullCustomer.addresses) && fullCustomer.addresses.length
+      ? fullCustomer.addresses.find((a) => a.default) || fullCustomer.addresses[0]
+      : {};
+    const customerAddress = { ...customerAddressFromList, ...customerDefaultAddress };
 
     const shipping = shopifyOrder.shipping_address || {};
     const billing = shopifyOrder.billing_address || {};
-    const customer = shopifyOrder.customer || {};
-
-    function firstValue(...values) {
-      return values.find((v) => v !== undefined && v !== null && String(v).trim() !== '') || '';
-    }
+    const customer = { ...(shopifyOrder.customer || {}), ...fullCustomer };
 
     function readNoteAttribute(keys) {
       const attrs = [
@@ -148,19 +141,34 @@ shopifyOrder = fullOrderData.order;
       return found ? firstValue(found.value) : '';
     }
 
-    // Busca imagens dos produtos/variantes.
-    // O pedido da Shopify muitas vezes NÃO traz imagem dentro de line_items.
+    const orderEmail = String(
+      firstValue(shopifyOrder.email, shopifyOrder.contact_email, customer.email)
+    ).toLowerCase().trim();
+
+    const orderPhone = String(
+      firstValue(shopifyOrder.phone, customer.phone, shipping.phone, billing.phone, customerAddress.phone)
+    ).replace(/\D/g, '');
+
+    const requestEmail = String(email || '').toLowerCase().trim();
+    const requestPhone = String(phone || '').replace(/\D/g, '');
+
+    if (requestEmail && orderEmail && requestEmail !== orderEmail) {
+      return res.status(403).json({ error: 'E-mail não confere com o pedido.' });
+    }
+
+    if (requestPhone && orderPhone && !orderPhone.endsWith(requestPhone.slice(-8))) {
+      return res.status(403).json({ error: 'Telefone não confere com o pedido.' });
+    }
+
     const imageCache = new Map();
 
     async function getProductImage(item) {
       const productId = item.product_id;
       const variantId = item.variant_id;
-
       if (!productId) return '';
 
       if (imageCache.has(productId)) {
-        const cachedProduct = imageCache.get(productId);
-        return pickImageFromProduct(cachedProduct, variantId);
+        return pickImageFromProduct(imageCache.get(productId), variantId);
       }
 
       try {
@@ -183,7 +191,6 @@ shopifyOrder = fullOrderData.order;
           const variantIds = img.variant_ids || [];
           return variantIds.map(String).includes(String(variantId));
         });
-
         if (variantImage?.src) return variantImage.src;
       }
 
@@ -207,6 +214,17 @@ shopifyOrder = fullOrderData.order;
       };
     }));
 
+    const customerName = firstValue(
+      `${customer.first_name || ''} ${customer.last_name || ''}`.trim(),
+      customer.name,
+      shipping.name,
+      billing.name,
+      customerAddress.name,
+      `${customerAddress.first_name || ''} ${customerAddress.last_name || ''}`.trim(),
+      readNoteAttribute(['nome', 'name']),
+      'Cliente NEWER'
+    );
+
     const normalized = {
       id: shopifyOrder.id,
       order_number: shopifyOrder.name || `#${shopifyOrder.order_number}`,
@@ -214,13 +232,7 @@ shopifyOrder = fullOrderData.order;
       created_at: shopifyOrder.created_at,
 
       customer: {
-        name: firstValue(
-          `${customer.first_name || ''} ${customer.last_name || ''}`.trim(),
-          shipping.name,
-          billing.name,
-          readNoteAttribute(['nome', 'name']),
-          'Cliente NEWER'
-        ),
+        name: customerName,
         email: firstValue(
           shopifyOrder.email,
           shopifyOrder.contact_email,
@@ -232,32 +244,52 @@ shopifyOrder = fullOrderData.order;
           customer.phone,
           shipping.phone,
           billing.phone,
+          customerAddress.phone,
           readNoteAttribute(['telefone', 'phone', 'whatsapp', 'celular'])
         )
       },
 
       shipping_address: {
-        name: firstValue(shipping.name, billing.name),
+        name: firstValue(
+          shipping.name,
+          billing.name,
+          customerAddress.name,
+          customerName
+        ),
         address1: firstValue(
           shipping.address1,
           billing.address1,
+          customerAddress.address1,
           readNoteAttribute(['endereco', 'endereço', 'rua', 'address'])
         ),
         address2: firstValue(
           shipping.address2,
           billing.address2,
+          customerAddress.address2,
           readNoteAttribute(['complemento', 'bairro', 'numero', 'número'])
         ),
-        city: firstValue(shipping.city, billing.city, readNoteAttribute(['cidade', 'city'])),
+        city: firstValue(
+          shipping.city,
+          billing.city,
+          customerAddress.city,
+          readNoteAttribute(['cidade', 'city'])
+        ),
         province: firstValue(
           shipping.province,
           shipping.province_code,
           billing.province,
           billing.province_code,
+          customerAddress.province,
+          customerAddress.province_code,
           readNoteAttribute(['estado', 'uf', 'state'])
         ),
-        zip: firstValue(shipping.zip, billing.zip, readNoteAttribute(['cep', 'zip', 'postal'])),
-        phone: firstValue(shipping.phone, billing.phone, customer.phone)
+        zip: firstValue(
+          shipping.zip,
+          billing.zip,
+          customerAddress.zip,
+          readNoteAttribute(['cep', 'zip', 'postal'])
+        ),
+        phone: firstValue(shipping.phone, billing.phone, customer.phone, customerAddress.phone)
       },
 
       payment_method:
