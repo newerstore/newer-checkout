@@ -191,11 +191,10 @@ export default async function handler(req, res) {
         shipping_address: address,
         billing_address: address,
         customer: {
-          first_name: firstName,
-          last_name: lastName,
-          email: meta.customer_email || payment.payer?.email || '',
-          phone: meta.customer_phone || ''
-        },
+  first_name: firstName,
+  last_name: lastName,
+  email: meta.customer_email || payment.payer?.email || ''
+},,
         transactions: [
           {
             kind: 'sale',
