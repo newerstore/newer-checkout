@@ -69,10 +69,10 @@ export default async function handler(req, res) {
           installments: 6
         },
         back_urls: {
-          success: 'https://newer-store.com/pages/pedido-confirmado',
-          failure: 'https://newer-store.com/pages/checkout?status=failed',
-          pending: 'https://newer-store.com/pages/aguardando-pix'
-        },
+  success: 'https://newer-store.com/pages/pedido-confirmado',
+  failure: 'https://newer-store.com/pages/checkout?status=failed',
+  pending: 'https://newer-store.com/pages/pedido-confirmado'
+},
         auto_return: 'approved'
       })
     });
