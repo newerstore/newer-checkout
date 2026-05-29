@@ -194,7 +194,7 @@ module.exports = async function handler(req, res) {
   first_name: firstName,
   last_name: lastName,
   email: meta.customer_email || payment.payer?.email || ''
-},,
+},
         transactions: [
           {
             kind: 'sale',
