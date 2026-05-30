@@ -74,9 +74,20 @@ export default async function handler(req, res) {
 
     const data = await response.json();
 
+    // Filtra apenas Jadlog e Correios (PAC e SEDEX)
+    const ALLOWED = ['pac', 'sedex', 'jadlog', '.package', '.com'];
+    const filtered = Array.isArray(data)
+      ? data.filter(option => {
+          if (option.error) return false;
+          const name = (option.name || '').toLowerCase();
+          const company = (option.company?.name || '').toLowerCase();
+          return ALLOWED.some(k => name.includes(k) || company.includes(k));
+        })
+      : data;
+
     return res.status(200).json({
       success: true,
-      options: data
+      options: filtered
     });
 
   } catch (error) {
