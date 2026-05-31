@@ -25,12 +25,15 @@ export default async function handler(req, res) {
     }
 
     const dryRun = String(req.query.dry_run ?? 'true') !== 'false';
-    const limit = Math.min(Number(req.query.limit || 12), 40);
-    const maxPages = Math.min(Number(req.query.pages || 2), 5);
+    const limit = Math.min(Math.max(Number(req.query.limit || 10), 1), 20);
+    const maxPages = Math.min(Math.max(Number(req.query.pages || 2), 1), 5);
+    const skip = Math.max(Number(req.query.skip || 0), 0);
 
     const report = [];
     const createdTitles = new Set();
+
     let processed = 0;
+    let eligibleSeen = 0;
 
     for (const collection of TEST_COLLECTIONS) {
       const links = await getProductLinksFromCollection(collection.url, maxPages);
@@ -80,6 +83,23 @@ export default async function handler(req, res) {
 
           createdTitles.add(titleKey);
 
+          if (eligibleSeen < skip) {
+            report.push({
+              team: collection.team,
+              url: link,
+              skipped: true,
+              reason: 'skip_offset',
+              skip,
+              eligibleSeen,
+              sourceTitle: sourceProduct.sourceTitle,
+              shopifyTitle: preview.title
+            });
+            eligibleSeen++;
+            continue;
+          }
+
+          eligibleSeen++;
+
           const result = await createProduct(sourceProduct, { dryRun });
 
           report.push({
@@ -108,6 +128,9 @@ export default async function handler(req, res) {
       ok: true,
       mode: dryRun ? 'dry_run_preview' : 'create_drafts',
       processed,
+      skip,
+      limit,
+      pages: maxPages,
       collections: TEST_COLLECTIONS.map(c => c.team),
       report
     });
