@@ -18,7 +18,8 @@ export default async function handler(req, res) {
     const maxPages = Math.min(Number(req.query.pages || 2), 5);
 
     const report = [];
-    let processed = 0;
+const createdTitles = new Set();
+let processed = 0;;
 
     for (const collection of TEST_COLLECTIONS) {
       const links = await getProductLinksFromCollection(collection.url, maxPages);
