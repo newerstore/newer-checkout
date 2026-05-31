@@ -27,9 +27,26 @@ export default async function handler(req, res) {
         try {
           const sourceProduct = await scrapeProduct(link, collection.team);
           if (!isLikelyJersey(sourceProduct.sourceTitle)) {
-            report.push({ team: collection.team, url: link, skipped: true, reason: 'not_likely_jersey', sourceTitle: sourceProduct.sourceTitle });
-            continue;
-          }
+  report.push({
+    team: collection.team,
+    url: link,
+    skipped: true,
+    reason: 'not_likely_jersey',
+    sourceTitle: sourceProduct.sourceTitle
+  });
+  continue;
+}
+
+if (!sourceProduct.images?.length) {
+  report.push({
+    team: collection.team,
+    url: link,
+    skipped: true,
+    reason: 'no_images',
+    sourceTitle: sourceProduct.sourceTitle
+  });
+  continue;
+}
           const preview = buildProductPayload(sourceProduct).product;
           const result = await createProduct(sourceProduct, { dryRun });
           report.push({
