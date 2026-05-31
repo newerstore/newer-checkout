@@ -2,6 +2,16 @@ import { TEST_COLLECTIONS, IMPORT_SECRET } from '../lib/config.js';
 import { getProductLinksFromCollection, scrapeProduct, isLikelyJersey } from '../lib/scraper.js';
 import { createProduct, buildProductPayload } from '../lib/shopify.js';
 
+function normalizeTitleKey(title = '') {
+  return String(title || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export default async function handler(req, res) {
   try {
     if (req.method !== 'GET' && req.method !== 'POST') {
@@ -9,6 +19,7 @@ export default async function handler(req, res) {
     }
 
     const secret = req.query.secret || req.headers['x-import-secret'];
+
     if (IMPORT_SECRET && secret !== IMPORT_SECRET) {
       return res.status(401).json({ error: 'Secret inválido.' });
     }
@@ -18,53 +29,60 @@ export default async function handler(req, res) {
     const maxPages = Math.min(Number(req.query.pages || 2), 5);
 
     const report = [];
-const createdTitles = new Set();
-let processed = 0;;
+    const createdTitles = new Set();
+    let processed = 0;
 
     for (const collection of TEST_COLLECTIONS) {
       const links = await getProductLinksFromCollection(collection.url, maxPages);
+
       for (const link of links) {
         if (processed >= limit) break;
+
         try {
           const sourceProduct = await scrapeProduct(link, collection.team);
+
           if (!isLikelyJersey(sourceProduct.sourceTitle)) {
-  report.push({
-    team: collection.team,
-    url: link,
-    skipped: true,
-    reason: 'not_likely_jersey',
-    sourceTitle: sourceProduct.sourceTitle
-  });
-  continue;
-}
+            report.push({
+              team: collection.team,
+              url: link,
+              skipped: true,
+              reason: 'not_likely_jersey',
+              sourceTitle: sourceProduct.sourceTitle
+            });
+            continue;
+          }
 
-if (!sourceProduct.images?.length) {
-  report.push({
-    team: collection.team,
-    url: link,
-    skipped: true,
-    reason: 'no_images',
-    sourceTitle: sourceProduct.sourceTitle
-  });
-  continue;
-}
+          if (!sourceProduct.images?.length) {
+            report.push({
+              team: collection.team,
+              url: link,
+              skipped: true,
+              reason: 'no_images',
+              sourceTitle: sourceProduct.sourceTitle
+            });
+            continue;
+          }
+
           const preview = buildProductPayload(sourceProduct).product;
+          const titleKey = normalizeTitleKey(preview.title);
 
-if (createdTitles.has(preview.title)) {
-  report.push({
-    team: collection.team,
-    skipped: true,
-    reason: 'duplicate_title',
-    title: preview.title
-  });
-  continue;
-}
+          if (createdTitles.has(titleKey)) {
+            report.push({
+              team: collection.team,
+              url: link,
+              skipped: true,
+              reason: 'duplicate_title',
+              sourceTitle: sourceProduct.sourceTitle,
+              shopifyTitle: preview.title
+            });
+            continue;
+          }
 
-createdTitles.add(preview.title);
+          createdTitles.add(titleKey);
 
-const result = await createProduct(sourceProduct, { dryRun });
+          const result = await createProduct(sourceProduct, { dryRun });
 
-report.push({
+          report.push({
             team: collection.team,
             sourceTitle: sourceProduct.sourceTitle,
             shopifyTitle: preview.title,
@@ -72,11 +90,17 @@ report.push({
             images: sourceProduct.images.length,
             result
           });
+
           processed++;
         } catch (error) {
-          report.push({ team: collection.team, url: link, error: error.message });
+          report.push({
+            team: collection.team,
+            url: link,
+            error: error.message
+          });
         }
       }
+
       if (processed >= limit) break;
     }
 
@@ -88,7 +112,9 @@ report.push({
       report
     });
   } catch (error) {
-    return res.status(500).json({ ok: false, error: error.message });
+    return res.status(500).json({
+      ok: false,
+      error: error.message
+    });
   }
 }
-
