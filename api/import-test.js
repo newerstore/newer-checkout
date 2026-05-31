@@ -25,8 +25,13 @@ export default async function handler(req, res) {
     }
 
     const dryRun = String(req.query.dry_run ?? 'true') !== 'false';
+
+    // Limite menor para não estourar timeout da Vercel.
     const limit = Math.min(Math.max(Number(req.query.limit || 10), 1), 20);
-    const maxPages = Math.min(Math.max(Number(req.query.pages || 2), 1), 5);
+
+    // Agora permite até 10 páginas, antes estava travado em 5.
+    const maxPages = Math.min(Math.max(Number(req.query.pages || 2), 1), 10);
+
     const skip = Math.max(Number(req.query.skip || 0), 0);
 
     const report = [];
@@ -34,9 +39,11 @@ export default async function handler(req, res) {
 
     let processed = 0;
     let eligibleSeen = 0;
+    let totalLinksFound = 0;
 
     for (const collection of TEST_COLLECTIONS) {
       const links = await getProductLinksFromCollection(collection.url, maxPages);
+      totalLinksFound += links.length;
 
       for (const link of links) {
         if (processed >= limit) break;
@@ -69,6 +76,7 @@ export default async function handler(req, res) {
           const preview = buildProductPayload(sourceProduct).product;
           const titleKey = normalizeTitleKey(preview.title);
 
+          // Deduplica apenas dentro da mesma execução, já com títulos mais específicos no shopify.js.
           if (createdTitles.has(titleKey)) {
             report.push({
               team: collection.team,
@@ -94,6 +102,7 @@ export default async function handler(req, res) {
               sourceTitle: sourceProduct.sourceTitle,
               shopifyTitle: preview.title
             });
+
             eligibleSeen++;
             continue;
           }
@@ -107,6 +116,7 @@ export default async function handler(req, res) {
             sourceTitle: sourceProduct.sourceTitle,
             shopifyTitle: preview.title,
             price: preview.variants?.[0]?.price,
+            variants: preview.variants?.length || 0,
             images: sourceProduct.images.length,
             result
           });
@@ -131,6 +141,8 @@ export default async function handler(req, res) {
       skip,
       limit,
       pages: maxPages,
+      totalLinksFound,
+      eligibleSeen,
       collections: TEST_COLLECTIONS.map(c => c.team),
       report
     });
