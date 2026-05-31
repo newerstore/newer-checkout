@@ -49,8 +49,22 @@ if (!sourceProduct.images?.length) {
   continue;
 }
           const preview = buildProductPayload(sourceProduct).product;
-          const result = await createProduct(sourceProduct, { dryRun });
-          report.push({
+
+if (createdTitles.has(preview.title)) {
+  report.push({
+    team: collection.team,
+    skipped: true,
+    reason: 'duplicate_title',
+    title: preview.title
+  });
+  continue;
+}
+
+createdTitles.add(preview.title);
+
+const result = await createProduct(sourceProduct, { dryRun });
+
+report.push({
             team: collection.team,
             sourceTitle: sourceProduct.sourceTitle,
             shopifyTitle: preview.title,
