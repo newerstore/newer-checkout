@@ -155,17 +155,6 @@ function normalizeShopifyItems(items) {
   });
 }
 
-function getBaseUrl(req) {
-  if (process.env.PUBLIC_API_URL) {
-    return process.env.PUBLIC_API_URL.replace(/\/$/, '');
-  }
-
-  const host = req.headers['x-forwarded-host'] || req.headers.host;
-  const proto = req.headers['x-forwarded-proto'] || 'https';
-
-  return `${proto}://${host}`.replace(/\/$/, '');
-}
-
 export default async function handler(req, res) {
   setCors(req, res);
 
@@ -305,8 +294,13 @@ export default async function handler(req, res) {
       shopify_items: JSON.stringify(shopifyItems)
     };
 
-    const baseUrl = getBaseUrl(req);
-    const notificationUrl = `${baseUrl}/api/mercadopago-webhook`;
+    // NOTA: notification_url foi removida intencionalmente.
+    // O webhook deve ser configurado UMA ÚNICA VEZ no painel do Mercado Pago
+    // (Seu negócio → Configurações → Webhooks) apontando para:
+    // https://sua-url.vercel.app/api/mercadopago-webhook
+    //
+    // Manter notification_url aqui causava disparo duplo:
+    // um pelo painel do MP + um por cada preferência criada.
 
     const response = await fetch('https://api.mercadopago.com/checkout/preferences', {
       method: 'POST',
@@ -324,7 +318,6 @@ export default async function handler(req, res) {
           }
         },
         metadata,
-        notification_url: notificationUrl,
         external_reference: `newer_${Date.now()}`,
         payment_methods: {
           installments: 6
@@ -348,8 +341,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       success: true,
       init_point: data.init_point,
-      preference_id: data.id,
-      notification_url: notificationUrl
+      preference_id: data.id
     });
   } catch (error) {
     console.log('ERRO CREATE PAYMENT:', error);
