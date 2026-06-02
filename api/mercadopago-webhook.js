@@ -186,6 +186,15 @@ export default async function handler(req, res) {
       paymentId
     });
 
+    // Ignora eventos que não sejam de pagamento (ex: topic_merchant_order_wh,
+    // merchant_order, chargebacks, etc). O MP dispara múltiplos tipos de evento
+    // para a mesma transação — processar só "payment" evita pedidos duplicados.
+    const topic = req.query.topic || req.query.type || req.body?.type || '';
+    if (topic && topic !== 'payment') {
+      console.log('EVENTO IGNORADO (não é payment):', topic);
+      return res.status(200).json({ success: true, ignored: true, topic });
+    }
+
     if (!paymentId) {
       return res.status(200).json({ success: false, message: 'Sem payment id' });
     }
