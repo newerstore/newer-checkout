@@ -24,6 +24,76 @@ function normalizeProperties(properties) {
   return [];
 }
 
+function pick(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      return String(value).trim();
+    }
+  }
+  return '';
+}
+
+function getPropertyValue(properties, names) {
+  const normalized = normalizeProperties(properties);
+  const wantedNames = names.map(function (name) {
+    return String(name).toLowerCase().trim();
+  });
+
+  const found = normalized.find(function (prop) {
+    return wantedNames.includes(String(prop.name).toLowerCase().trim());
+  });
+
+  return found ? String(found.value).trim() : '';
+}
+
+function upsertProperty(properties, name, value) {
+  const normalized = normalizeProperties(properties);
+  const cleanValue = String(value || '').trim();
+
+  if (!cleanValue) return normalized;
+
+  const exists = normalized.some(function (prop) {
+    return String(prop.name).toLowerCase().trim() === String(name).toLowerCase().trim();
+  });
+
+  if (!exists) {
+    normalized.push({ name, value: cleanValue });
+  }
+
+  return normalized;
+}
+
+function isIconsItem(item) {
+  const text = [
+    item?.title,
+    item?.product_title,
+    item?.handle,
+    item?.product_type,
+    item?.collection,
+    item?.vendor,
+    item?.tags
+  ].join(' ').toLowerCase();
+
+  return text.includes('icons');
+}
+
+function getIconsSize(item) {
+  return pick(
+    item?.size,
+    item?.tamanho,
+    item?.selected_size,
+    item?.selectedSize,
+    item?.properties?.Tamanho,
+    item?.properties?.tamanho,
+    item?.properties?.Size,
+    item?.properties?.size,
+    getPropertyValue(item?.properties, ['Tamanho', 'tamanho', 'Size', 'size']),
+    item?.variant_title,
+    item?.variantTitle,
+    item?.option1
+  );
+}
+
 function getPaymentId(req) {
   const body = req.body || {};
   const query = req.query || {};
@@ -46,6 +116,44 @@ function requiredEnv(name) {
     throw new Error(`Variável de ambiente ausente: ${name}`);
   }
   return value;
+}
+
+async function shopifyRequest({ shopifyStoreDomain, shopifyApiVersion, shopifyAdminToken, path, method = 'GET', body }) {
+  const response = await fetch(`https://${shopifyStoreDomain}/admin/api/${shopifyApiVersion}${path}`, {
+    method,
+    headers: {
+      'X-Shopify-Access-Token': shopifyAdminToken,
+      'Content-Type': 'application/json'
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+
+  const data = await response.json().catch(function () {
+    return {};
+  });
+
+  return { response, data };
+}
+
+function orderAlreadyHasPayment(order, paymentId) {
+  const id = String(paymentId || '').trim();
+  if (!id) return false;
+
+  const note = String(order.note || '');
+  const sourceIdentifier = String(order.source_identifier || '');
+  const noteAttributes = Array.isArray(order.note_attributes) ? order.note_attributes : [];
+
+  return (
+    sourceIdentifier === id ||
+    sourceIdentifier === `mp_${id}` ||
+    note.includes(id) ||
+    noteAttributes.some(function (attr) {
+      return (
+        String(attr.name || '').toLowerCase() === 'mercado_pago_payment_id' &&
+        String(attr.value || '') === id
+      );
+    })
+  );
 }
 
 export default async function handler(req, res) {
@@ -98,6 +206,32 @@ export default async function handler(req, res) {
 
     const meta = payment.metadata || {};
 
+    const existingOrdersCheck = await shopifyRequest({
+      shopifyStoreDomain,
+      shopifyApiVersion,
+      shopifyAdminToken,
+      path: `/orders.json?status=any&limit=250&fields=id,note,name,order_number,note_attributes,source_identifier`
+    });
+
+    if (!existingOrdersCheck.response.ok) {
+      console.log('SHOPIFY EXISTING ORDERS ERROR:', JSON.stringify(existingOrdersCheck.data, null, 2));
+      return res.status(200).json({
+        success: false,
+        message: 'Erro ao verificar pedidos existentes na Shopify',
+        shopify_status: existingOrdersCheck.response.status,
+        shopify_error: existingOrdersCheck.data
+      });
+    }
+
+    const alreadyExists = existingOrdersCheck.data.orders?.some(function (order) {
+      return orderAlreadyHasPayment(order, payment.id);
+    });
+
+    if (alreadyExists) {
+      console.log('PEDIDO DUPLICADO BLOQUEADO PARA PAYMENT ID:', payment.id);
+      return res.status(200).json({ success: true, duplicated: true, message: 'Pedido já existia para esse pagamento.' });
+    }
+
     let shopifyItems = [];
 
     try {
@@ -108,17 +242,25 @@ export default async function handler(req, res) {
 
     const productLineItems = shopifyItems.length
       ? shopifyItems.map(function (item) {
-          const properties = normalizeProperties(item.properties);
+          let properties = normalizeProperties(item.properties);
           const unitPrice = Number(item.unit_price ?? item.price ?? 0);
+          const iconsSize = getIconsSize(item);
+
+          if (isIconsItem(item) && iconsSize) {
+            properties = upsertProperty(properties, 'Tamanho', iconsSize);
+          }
 
           const lineItem = {
-            title: item.title || 'Produto NEWER',
+            title: item.title || item.product_title || 'Produto NEWER',
             quantity: Number(item.quantity || 1),
             price: unitPrice.toFixed(2),
-            variant_title: item.variant_title || undefined,
             requires_shipping: true,
             taxable: false
           };
+
+          if (item.variant_title || iconsSize) {
+            lineItem.variant_title = item.variant_title || iconsSize;
+          }
 
           if (item.variant_id) {
             lineItem.variant_id = Number(item.variant_id);
@@ -145,36 +287,6 @@ export default async function handler(req, res) {
         ];
 
     const shippingPrice = Number(meta.shipping_price || 0);
-
-    const existingOrdersResponse = await fetch(
-      `https://${shopifyStoreDomain}/admin/api/${shopifyApiVersion}/orders.json?status=any&limit=250&fields=id,note,name,order_number`,
-      {
-        headers: {
-          'X-Shopify-Access-Token': shopifyAdminToken,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-
-    const existingOrders = await existingOrdersResponse.json();
-
-    if (!existingOrdersResponse.ok) {
-      console.log('SHOPIFY EXISTING ORDERS ERROR:', JSON.stringify(existingOrders, null, 2));
-      return res.status(200).json({
-        success: false,
-        message: 'Erro ao verificar pedidos existentes na Shopify',
-        shopify_status: existingOrdersResponse.status,
-        shopify_error: existingOrders
-      });
-    }
-
-    const alreadyExists = existingOrders.orders?.some(order =>
-      String(order.note || '').includes(String(payment.id))
-    );
-
-    if (alreadyExists) {
-      return res.status(200).json({ success: true, duplicated: true });
-    }
 
     const customerName = meta.customer_name || payment.payer?.first_name || '';
     const nameParts = customerName.trim().split(' ').filter(Boolean);
@@ -220,6 +332,8 @@ export default async function handler(req, res) {
         email: meta.customer_email || payment.payer?.email || '',
         financial_status: 'paid',
         fulfillment_status: null,
+        source_name: 'Mercado Pago',
+        source_identifier: String(payment.id || ''),
         note: noteLines.join('\n'),
         tags: 'Mercado Pago, NEWER Checkout',
         note_attributes: [
@@ -268,27 +382,22 @@ export default async function handler(req, res) {
       }
     };
 
-    const orderResponse = await fetch(
-      `https://${shopifyStoreDomain}/admin/api/${shopifyApiVersion}/orders.json`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': shopifyAdminToken
-        },
-        body: JSON.stringify(orderPayload)
-      }
-    );
+    const orderCreate = await shopifyRequest({
+      shopifyStoreDomain,
+      shopifyApiVersion,
+      shopifyAdminToken,
+      path: '/orders.json',
+      method: 'POST',
+      body: orderPayload
+    });
 
-    const orderData = await orderResponse.json();
-
-    console.log('SHOPIFY STATUS:', orderResponse.status);
-    console.log('SHOPIFY ORDER:', JSON.stringify(orderData, null, 2));
+    console.log('SHOPIFY STATUS:', orderCreate.response.status);
+    console.log('SHOPIFY ORDER:', JSON.stringify(orderCreate.data, null, 2));
 
     return res.status(200).json({
-      success: orderResponse.ok,
-      shopify_status: orderResponse.status,
-      order: orderData
+      success: orderCreate.response.ok,
+      shopify_status: orderCreate.response.status,
+      order: orderCreate.data
     });
   } catch (error) {
     console.log('ERRO WEBHOOK:', error);
