@@ -135,25 +135,40 @@ async function shopifyRequest({ shopifyStoreDomain, shopifyApiVersion, shopifyAd
   return { response, data };
 }
 
-function orderAlreadyHasPayment(order, paymentId) {
-  const id = String(paymentId || '').trim();
-  if (!id) return false;
+// Verifica duplicata buscando diretamente pelo source_identifier (mp_<paymentId>).
+// Faz até 2 tentativas com 1.5s de intervalo para absorver webhooks simultâneos
+// disparados pelo Mercado Pago no mesmo instante.
+async function checkDuplicate(paymentId, { shopifyStoreDomain, shopifyApiVersion, shopifyAdminToken }) {
+  const id = String(paymentId).trim();
 
-  const note = String(order.note || '');
-  const sourceIdentifier = String(order.source_identifier || '');
-  const noteAttributes = Array.isArray(order.note_attributes) ? order.note_attributes : [];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) {
+      await new Promise(r => setTimeout(r, 1500));
+    }
 
-  return (
-    sourceIdentifier === id ||
-    sourceIdentifier === `mp_${id}` ||
-    note.includes(id) ||
-    noteAttributes.some(function (attr) {
-      return (
-        String(attr.name || '').toLowerCase() === 'mercado_pago_payment_id' &&
-        String(attr.value || '') === id
-      );
-    })
-  );
+    const [r1, r2] = await Promise.all([
+      shopifyRequest({
+        shopifyStoreDomain,
+        shopifyApiVersion,
+        shopifyAdminToken,
+        path: `/orders.json?status=any&source_identifier=mp_${id}&fields=id,source_identifier&limit=5`
+      }),
+      shopifyRequest({
+        shopifyStoreDomain,
+        shopifyApiVersion,
+        shopifyAdminToken,
+        path: `/orders.json?status=any&source_identifier=${id}&fields=id,source_identifier&limit=5`
+      })
+    ]);
+
+    const found =
+      (Array.isArray(r1.data.orders) && r1.data.orders.length > 0) ||
+      (Array.isArray(r2.data.orders) && r2.data.orders.length > 0);
+
+    if (found) return true;
+  }
+
+  return false;
 }
 
 export default async function handler(req, res) {
@@ -206,30 +221,20 @@ export default async function handler(req, res) {
 
     const meta = payment.metadata || {};
 
-    const existingOrdersCheck = await shopifyRequest({
-      shopifyStoreDomain,
-      shopifyApiVersion,
-      shopifyAdminToken,
-      path: `/orders.json?status=any&limit=250&fields=id,note,name,order_number,note_attributes,source_identifier`
-    });
+    const shopifyConfig = { shopifyStoreDomain, shopifyApiVersion, shopifyAdminToken };
 
-    if (!existingOrdersCheck.response.ok) {
-      console.log('SHOPIFY EXISTING ORDERS ERROR:', JSON.stringify(existingOrdersCheck.data, null, 2));
-      return res.status(200).json({
-        success: false,
-        message: 'Erro ao verificar pedidos existentes na Shopify',
-        shopify_status: existingOrdersCheck.response.status,
-        shopify_error: existingOrdersCheck.data
-      });
-    }
+    // Verificação anti-duplicata: busca direta por source_identifier em vez de
+    // varrer todos os pedidos com limit=250. Também faz retry para cobrir a
+    // condição de corrida quando o MP dispara múltiplos webhooks simultâneos.
+    const isDuplicate = await checkDuplicate(payment.id, shopifyConfig);
 
-    const alreadyExists = existingOrdersCheck.data.orders?.some(function (order) {
-      return orderAlreadyHasPayment(order, payment.id);
-    });
-
-    if (alreadyExists) {
+    if (isDuplicate) {
       console.log('PEDIDO DUPLICADO BLOQUEADO PARA PAYMENT ID:', payment.id);
-      return res.status(200).json({ success: true, duplicated: true, message: 'Pedido já existia para esse pagamento.' });
+      return res.status(200).json({
+        success: true,
+        duplicated: true,
+        message: 'Pedido já existia para esse pagamento.'
+      });
     }
 
     let shopifyItems = [];
@@ -333,7 +338,9 @@ export default async function handler(req, res) {
         financial_status: 'paid',
         fulfillment_status: null,
         source_name: 'Mercado Pago',
-        source_identifier: String(payment.id || ''),
+        // Prefixo mp_ padronizado — é o mesmo valor buscado em checkDuplicate,
+        // garantindo que um segundo webhook encontre o pedido já criado.
+        source_identifier: `mp_${payment.id}`,
         note: noteLines.join('\n'),
         tags: 'Mercado Pago, NEWER Checkout',
         note_attributes: [
