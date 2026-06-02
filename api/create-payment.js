@@ -37,6 +37,124 @@ function pickNumber(...values) {
   return 0;
 }
 
+function normalizeProperties(properties) {
+  if (!properties) return [];
+
+  if (Array.isArray(properties)) {
+    return properties
+      .filter(function (prop) {
+        return prop && prop.name && prop.value !== undefined && prop.value !== null && String(prop.value).trim() !== '';
+      })
+      .map(function (prop) {
+        return { name: String(prop.name), value: String(prop.value) };
+      });
+  }
+
+  if (typeof properties === 'object') {
+    return Object.entries(properties)
+      .filter(function ([key, value]) {
+        return key && value !== undefined && value !== null && String(value).trim() !== '';
+      })
+      .map(function ([key, value]) {
+        return { name: String(key), value: String(value) };
+      });
+  }
+
+  return [];
+}
+
+function getPropertyValue(properties, names) {
+  const normalized = normalizeProperties(properties);
+  const wantedNames = names.map(function (name) {
+    return String(name).toLowerCase().trim();
+  });
+
+  const found = normalized.find(function (prop) {
+    return wantedNames.includes(String(prop.name).toLowerCase().trim());
+  });
+
+  return found ? String(found.value).trim() : '';
+}
+
+function upsertProperty(properties, name, value) {
+  const normalized = normalizeProperties(properties);
+  const cleanValue = String(value || '').trim();
+
+  if (!cleanValue) return normalized;
+
+  const exists = normalized.some(function (prop) {
+    return String(prop.name).toLowerCase().trim() === String(name).toLowerCase().trim();
+  });
+
+  if (!exists) {
+    normalized.push({ name, value: cleanValue });
+  }
+
+  return normalized;
+}
+
+function isIconsItem(item) {
+  const text = [
+    item?.title,
+    item?.product_title,
+    item?.handle,
+    item?.product_type,
+    item?.collection,
+    item?.vendor,
+    item?.tags
+  ].join(' ').toLowerCase();
+
+  return text.includes('icons');
+}
+
+function getIconsSize(item) {
+  return pick(
+    item?.size,
+    item?.tamanho,
+    item?.selected_size,
+    item?.selectedSize,
+    item?.properties?.Tamanho,
+    item?.properties?.tamanho,
+    item?.properties?.Size,
+    item?.properties?.size,
+    getPropertyValue(item?.properties, ['Tamanho', 'tamanho', 'Size', 'size']),
+    item?.variant_title,
+    item?.variantTitle,
+    item?.option1
+  );
+}
+
+function normalizeShopifyItems(items) {
+  if (!Array.isArray(items)) return [];
+
+  return items.map(function (item) {
+    const iconsSize = getIconsSize(item);
+    const normalized = {
+      title: item.title || item.product_title || 'Produto NEWER',
+      product_title: item.product_title || item.title || 'Produto NEWER',
+      quantity: Number(item.quantity || 1),
+      price: pickNumber(item.price, item.unit_price, item.final_price, 0),
+      unit_price: pickNumber(item.unit_price, item.price, item.final_price, 0),
+      variant_id: item.variant_id || item.id || '',
+      variant_title: item.variant_title || item.variantTitle || iconsSize || '',
+      sku: item.sku || '',
+      handle: item.handle || '',
+      product_type: item.product_type || '',
+      vendor: item.vendor || '',
+      tags: item.tags || '',
+      properties: normalizeProperties(item.properties)
+    };
+
+    if (isIconsItem(normalized) || isIconsItem(item)) {
+      normalized.size = iconsSize;
+      normalized.tamanho = iconsSize;
+      normalized.properties = upsertProperty(normalized.properties, 'Tamanho', iconsSize || 'Não informado');
+    }
+
+    return normalized;
+  });
+}
+
 function getBaseUrl(req) {
   if (process.env.PUBLIC_API_URL) {
     return process.env.PUBLIC_API_URL.replace(/\/$/, '');
@@ -65,7 +183,8 @@ export default async function handler(req, res) {
     }
 
     const body = req.body || {};
-    const shopifyItems = body.shopify_items || body.cart_items || [];
+    const rawShopifyItems = body.shopify_items || body.cart_items || [];
+    const shopifyItems = normalizeShopifyItems(rawShopifyItems);
 
     const customerName = pick(
       body.name,
