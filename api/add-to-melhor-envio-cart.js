@@ -14,57 +14,134 @@ const SERVICE_MAP = {
   'sedex':                  2,
   'mini envios':            17,
   'mini envios correios':   17,
+
   // Jadlog
   '.package':               3,
   'jadlog package':         3,
+  'jadlog .package':        3,
   '.com':                   4,
   'jadlog .com':            4,
-  'jadlog .package':        3,
+
   // Via Brasil
   'rodoviário':             22,
   'aéreo':                  23,
+
   // Azul Cargo
   'azul amanhã':            28,
   'azul':                   28,
+
   // Latam Cargo
   'latam cargo':            29,
+
   // Express / outros nomes comuns
-  'express':                2,   // mapeia para SEDEX como fallback
+  'express':                2,
   'rapido':                 2,
   'rápido':                 2,
   'expresso':               2,
 };
 
+function toNumber(value, fallback = 0) {
+  const n = Number(String(value ?? '').replace(',', '.'));
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function normalizeText(value = '') {
+  return String(value || '').toLowerCase().trim();
+}
+
+function isMelhorEnvioShippingLine(line = {}) {
+  const title = normalizeText(line.title);
+  const code = normalizeText(line.code);
+  const source = normalizeText(line.source);
+  const carrierIdentifier = normalizeText(line.carrier_identifier);
+
+  // O checkout próprio salva code assim: melhorenvio_1, melhorenvio_2, etc.
+  if (/melhorenvio_\d+/.test(code)) return true;
+
+  // Garante que só entra se veio claramente do Melhor Envio.
+  if (source.includes('melhor') || carrierIdentifier.includes('melhor')) return true;
+
+  // Fallback por nome do serviço.
+  // Mantém compatibilidade com pedidos antigos em que o code/source não vinham preenchidos.
+  const combined = `${title} ${code}`;
+
+  return Object.keys(SERVICE_MAP).some(key => combined.includes(key));
+}
+
 function resolveServiceId(shippingLines = []) {
   if (!shippingLines.length) return null;
 
-  const line = shippingLines[0];
-  const title = (line.title || '').toLowerCase().trim();
-  const code  = (line.code  || '').toLowerCase().trim();
+  const line = shippingLines.find(isMelhorEnvioShippingLine);
+  if (!line) return null;
+
+  const title = normalizeText(line.title);
+  const code  = normalizeText(line.code);
 
   // Tenta pelo code primeiro (ex: "melhorenvio_2" → 2)
   const codeMatch = code.match(/melhorenvio_(\d+)/);
-  if (codeMatch) return parseInt(codeMatch[1]);
+  if (codeMatch) return parseInt(codeMatch[1], 10);
 
   // Tenta pelo título
   for (const [key, id] of Object.entries(SERVICE_MAP)) {
     if (title.includes(key)) return id;
   }
 
-  // Fallback: PAC
-  console.warn(`[ME] Serviço não mapeado: "${title}" / "${code}". Usando PAC (1) como fallback.`);
-  return 1;
+  // IMPORTANTE:
+  // Não usar PAC como fallback aqui.
+  // Se não identificou serviço válido, é melhor pular do que criar etiqueta errada.
+  console.warn(`[ME] Serviço não mapeado: "${title}" / "${code}". Pulando etiqueta.`);
+  return null;
+}
+
+function getShippingPrice(order = {}) {
+  const linePrice = order.shipping_lines?.[0]?.price;
+  const totalShipping =
+    order.total_shipping_price_set?.shop_money?.amount ??
+    order.current_total_shipping_price_set?.shop_money?.amount ??
+    order.total_shipping_price ??
+    linePrice ??
+    0;
+
+  return toNumber(totalShipping, 0);
+}
+
+function shouldCreateMelhorEnvioLabel(order = {}) {
+  const shippingLines = order.shipping_lines || [];
+  const shippingPrice = getShippingPrice(order);
+
+  const hasMelhorEnvioShipping = shippingLines.some(isMelhorEnvioShippingLine);
+  const serviceId = resolveServiceId(shippingLines);
+
+  // Trava principal:
+  // Se o cliente não pagou frete Melhor Envio, NÃO cria etiqueta.
+  // Produtos importados/China com frete grátis devem cair aqui.
+  if (!hasMelhorEnvioShipping || !serviceId || shippingPrice <= 0) {
+    return {
+      ok: false,
+      serviceId,
+      shippingPrice,
+      reason: `Sem frete Melhor Envio pago. hasMelhorEnvioShipping=${hasMelhorEnvioShipping}, serviceId=${serviceId}, shippingPrice=${shippingPrice}`
+    };
+  }
+
+  return {
+    ok: true,
+    serviceId,
+    shippingPrice,
+    reason: 'Frete Melhor Envio pago encontrado.'
+  };
 }
 
 // ─── Extrai número do endereço (ex: "Rua das Flores, 123" → "123") ──────────
 function extractNumber(address1 = '') {
-  const match = address1.match(/,?\s*(\d+[A-Za-z]?)(\s|,|$)/);
+  const match = String(address1 || '').match(/,?\s*(\d+[A-Za-z]?)(\s|,|$)/);
   return match ? match[1] : 'S/N';
 }
 
 // ─── Extrai logradouro sem o número ─────────────────────────────────────────
 function extractStreet(address1 = '') {
-  return address1.replace(/,?\s*\d+[A-Za-z]?(\s*,.*)?$/, '').trim() || address1;
+  const clean = String(address1 || '');
+  return clean.replace(/,?\s*\d+[A-Za-z]?(\s*,.*)?$/, '').trim() || clean;
 }
 
 // ─── Valida assinatura HMAC do webhook Shopify ───────────────────────────────
@@ -86,9 +163,13 @@ export default async function handler(req, res) {
 
   if (typeof req.body === 'string') {
     rawBody = req.body;
-    try { order = JSON.parse(rawBody); } catch { return res.status(400).json({ error: 'JSON inválido.' }); }
+    try {
+      order = JSON.parse(rawBody);
+    } catch {
+      return res.status(400).json({ error: 'JSON inválido.' });
+    }
   } else {
-    rawBody = JSON.stringify(req.body);
+    rawBody = JSON.stringify(req.body || {});
   }
 
   if (!isValidShopifyWebhook(req, rawBody)) {
@@ -96,26 +177,47 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: 'Assinatura inválida.' });
   }
 
-  const orderNumber = order.name || `#${order.order_number}`;
+  const orderNumber = order.name || `#${order.order_number || order.id || 'sem-numero'}`;
   console.log(`[ME] Pedido recebido: ${orderNumber}`);
+
+  // ── TRAVA: só cria etiqueta se tiver frete Melhor Envio pago ──────────────
+  const labelCheck = shouldCreateMelhorEnvioLabel(order);
+
+  if (!labelCheck.ok) {
+    console.log(`[ME] Pedido ${orderNumber} pulado: ${labelCheck.reason}`);
+
+    return res.status(200).json({
+      success: true,
+      skipped: true,
+      pedido: orderNumber,
+      reason: labelCheck.reason
+    });
+  }
+
+  const serviceId = labelCheck.serviceId;
 
   // ── Dados do destinatário ────────────────────────────────────────────────
   const ship = order.shipping_address || order.billing_address || {};
 
   // Bairro: na sua loja vem em address2 (pode estar junto com complemento)
   // Se quiser separar complemento e bairro, adicione um campo customizado no checkout
-  const district = (ship.address2 || '').trim() || 'Centro';
+  const district = String(ship.address2 || '').trim() || 'Centro';
 
   // CPF: lê de note_attributes (salvo pelo mercadopago-webhook como 'customer_cpf')
   const attrs = order.note_attributes || [];
   const cpfAttr = attrs.find(a =>
-    ['cpf', 'customer_cpf', 'documento', 'document'].includes((a.name || a.key || '').toLowerCase().trim())
+    ['cpf', 'customer_cpf', 'documento', 'document'].includes(String(a.name || a.key || '').toLowerCase().trim())
   );
   const cpf = cpfAttr ? String(cpfAttr.value).replace(/\D/g, '') : '';
 
-  // ── Monta payload para o Melhor Envio ────────────────────────────────────
-  const serviceId = resolveServiceId(order.shipping_lines);
+  const customerName = String(
+    ship.name ||
+    `${order.customer?.first_name || ''} ${order.customer?.last_name || ''}`.trim() ||
+    order.email ||
+    'Cliente'
+  ).trim();
 
+  // ── Monta payload para o Melhor Envio ────────────────────────────────────
   const insuranceValue = parseFloat(order.total_price || '0');
 
   const mePayload = {
@@ -137,17 +239,17 @@ export default async function handler(req, res) {
     },
 
     to: {
-      name:        ship.name || order.customer?.first_name + ' ' + order.customer?.last_name,
+      name:        customerName,
       email:       order.email || '',
       document:    cpf,
-      phone:       (ship.phone || order.phone || '').replace(/\D/g, ''),
+      phone:       String(ship.phone || order.phone || '').replace(/\D/g, ''),
       address:     extractStreet(ship.address1 || ''),
       number:      extractNumber(ship.address1 || ''),
       complement:  '',          // address2 vai todo para district; ajuste se preferir separar
       district:    district,
       city:        ship.city || '',
-      state_abbr:  (ship.province_code || ship.province || '').slice(-2).toUpperCase(),
-      postal_code: (ship.zip || '').replace(/\D/g, ''),
+      state_abbr:  String(ship.province_code || ship.province || '').slice(-2).toUpperCase(),
+      postal_code: String(ship.zip || '').replace(/\D/g, ''),
       country_id:  'BR',
     },
 
@@ -160,9 +262,9 @@ export default async function handler(req, res) {
     // Mesmas dimensões do calculate-shipping.js — ajuste se tiver dimensões variáveis
     volumes: [
       {
-        height: parseInt(process.env.PACOTE_ALTURA      || '5'),
-        width:  parseInt(process.env.PACOTE_LARGURA     || '20'),
-        length: parseInt(process.env.PACOTE_COMPRIMENTO || '30'),
+        height: parseInt(process.env.PACOTE_ALTURA      || '5', 10),
+        width:  parseInt(process.env.PACOTE_LARGURA     || '20', 10),
+        length: parseInt(process.env.PACOTE_COMPRIMENTO || '30', 10),
         weight: parseFloat(process.env.PACOTE_PESO      || '0.3'),
       }
     ],
@@ -187,13 +289,13 @@ export default async function handler(req, res) {
       headers: {
         'Content-Type':  'application/json',
         'Accept':        'application/json',
-        'Authorization': `Bearer ${process.env.MELHOR_ENVIO_TOKEN.trim()}`,
+        'Authorization': `Bearer ${String(process.env.MELHOR_ENVIO_TOKEN || '').trim()}`,
         'User-Agent':    'NEWER STORE',
       },
       body: JSON.stringify(mePayload),
     });
 
-    const meData = await meRes.json();
+    const meData = await meRes.json().catch(() => ({}));
 
     if (!meRes.ok) {
       console.error(`[ME] Erro ao adicionar pedido ${orderNumber} ao carrinho:`, meData);
