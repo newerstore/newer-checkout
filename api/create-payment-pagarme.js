@@ -374,9 +374,6 @@ export default async function handler(req, res) {
         accepted_payment_methods: ['credit_card', 'pix'],
         credit_card_settings: {
           operation_type: 'auth_and_capture',
-          installments_setup: {
-            interest_type: 'simple'
-          },
           installments
         },
         pix_settings: {
@@ -443,6 +440,3 @@ export default async function handler(req, res) {
     return res.status(500).json({ success: false, error: error.message });
   }
 }
-
-
-// NOTE: Remove installments_setup and keep only operation_type + installments.
