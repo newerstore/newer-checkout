@@ -443,3 +443,6 @@ export default async function handler(req, res) {
     return res.status(500).json({ success: false, error: error.message });
   }
 }
+
+
+// NOTE: Remove installments_setup and keep only operation_type + installments.
