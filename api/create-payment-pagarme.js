@@ -146,6 +146,8 @@ function normalizeShopifyItems(items) {
       product_type: item.product_type || '',
       vendor: item.vendor || '',
       tags: item.tags || '',
+      // CORRIGIDO: preserva a imagem do produto para exibir no painel Shopify
+      image: item.image || item.featured_image || item.product_image || '',
       properties: normalizeProperties(item.properties)
     };
 
@@ -203,12 +205,14 @@ function buildPagarmeCartItems(shopifyItems, shippingName, shippingPrice, totalC
     const quantity = Math.max(1, Number(item.quantity || 1));
     const originalUnitCents = toCents(item.unit_price || item.price || 0);
     const adjustedUnitCents = Math.max(100, Math.round(originalUnitCents * discountFactor));
-    const size = item.variant_title || item.tamanho || item.size || '';
+    // CORRIGIDO: tamanho/variante vem de variant_title, tamanho ou size — nunca do título do produto
+    const size = pick(item.variant_title, item.tamanho, item.size, '');
 
     return {
       amount: adjustedUnitCents,
       name: String(item.title || item.product_title || 'Produto NEWER').slice(0, 256),
-      description: String(size || item.sku || '').slice(0, 256),
+      // CORRIGIDO: description recebe só o tamanho/variante, nunca o título do produto
+      description: String(size).slice(0, 256),
       code: String(item.variant_id || item.id || ''),
       default_quantity: quantity
     };
