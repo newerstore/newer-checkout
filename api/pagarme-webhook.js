@@ -388,12 +388,17 @@ function buildLineItemsFromShopify(shopifyItems) {
     const iconsSize = getIconsSize(item);
     const variantId = Number(item.variant_id || item.id || 0);
 
-    if (iconsSize) {
-      properties = upsertProperty(properties, 'Tamanho', iconsSize);
+    // CORRIGIDO: captura o tamanho real — variant_title tem prioridade, depois iconsSize
+    const tamanho = pick(item.variant_title, item.variantTitle, iconsSize, '');
+
+    if (tamanho) {
+      properties = upsertProperty(properties, 'Tamanho', tamanho);
     }
 
-    if (item.image) {
-      properties = upsertProperty(properties, '_imagem_produto', item.image);
+    // CORRIGIDO: preserva a imagem do produto nas propriedades para exibir no painel
+    const imagem = pick(item.image, item.featured_image, item.product_image, '');
+    if (imagem) {
+      properties = upsertProperty(properties, '_imagem_produto', imagem);
     }
 
     const lineItem = {
@@ -411,8 +416,9 @@ function buildLineItemsFromShopify(shopifyItems) {
     } else {
       lineItem.title = item.title || item.product_title || 'Produto NEWER';
       lineItem.price = unitPrice.toFixed(2);
-      if (item.variant_title || iconsSize) {
-        lineItem.variant_title = item.variant_title || iconsSize;
+      // CORRIGIDO: variant_title recebe o tamanho real, não o título do produto
+      if (tamanho) {
+        lineItem.variant_title = tamanho;
       }
       if (item.sku) {
         lineItem.sku = String(item.sku);
