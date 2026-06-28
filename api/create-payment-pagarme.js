@@ -208,12 +208,17 @@ function buildPagarmeCartItems(shopifyItems, shippingName, shippingPrice, totalC
     // CORRIGIDO: tamanho/variante vem de variant_title, tamanho ou size — nunca do título do produto
     const size = pick(item.variant_title, item.tamanho, item.size, '');
 
+    // Codifica tamanho, variant_id e image no description para o webhook recuperar
+    // Formato: "TAMANHO||VARIANT_ID||IMAGE_URL"
+    const variantIdStr = String(item.variant_id || item.id || '');
+    const imageStr = String(item.image || item.featured_image || '');
+    const encodedDescription = [size, variantIdStr, imageStr].join('||').slice(0, 256);
+
     return {
       amount: adjustedUnitCents,
       name: String(item.title || item.product_title || 'Produto NEWER').slice(0, 256),
-      // CORRIGIDO: description recebe só o tamanho/variante, nunca o título do produto
-      description: String(size).slice(0, 256),
-      code: String(item.variant_id || item.id || ''),
+      description: encodedDescription,
+      code: variantIdStr,
       default_quantity: quantity
     };
   });
