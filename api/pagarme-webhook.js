@@ -544,42 +544,35 @@ export default async function handler(req, res) {
 
     const fetchedOrder = orderId ? await pagarmeGet(`/orders/${orderId}`) : null;
 
-    // Pega o payment_link_id de qualquer campo disponível no webhook
+    // Pega o payment_link_id disponível no webhook
     const paymentLinkId = pick(
       data?.metadata?.payment_link_id,
       data?.order?.metadata?.payment_link_id,
       fetchedOrder?.metadata?.payment_link_id
     );
 
-    console.log('PAGARME PAYMENT LINK ID:', paymentLinkId);
-
-    // Busca o payment link diretamente para obter o metadata completo com shopify_items
-    let paymentLinkMeta = null;
+    // Busca o payment link para obter cart_settings (a Pagar.me não salva metadata no payment link)
+    let paymentLink = null;
     if (paymentLinkId) {
-      const paymentLink = await pagarmeGet(`/paymentlinks/${paymentLinkId}`);
-      console.log('PAGARME PAYMENT LINK FULL:', JSON.stringify(paymentLink, null, 2));
-      paymentLinkMeta = paymentLink?.metadata || null;
+      paymentLink = await pagarmeGet(`/paymentlinks/${paymentLinkId}`);
     }
 
-    // Usa o metadata do payment link se tiver shopify_items, senão usa o da order
-    let meta = paymentLinkMeta && paymentLinkMeta.shopify_items
-      ? paymentLinkMeta
-      : getMetadata(data, fetchedOrder);
+    // O metadata útil vem da order/charge (dados do cliente, endereço etc)
+    const meta = getMetadata(data, fetchedOrder);
 
-    // Se ainda não tem shopify_items, tenta enriquecer via payment link
-    if (!meta.shopify_items) {
-      meta = await enrichMetadataFromPaymentLink(meta, data, fetchedOrder);
-    }
+    console.log('PAGARME META KEYS:', meta ? Object.keys(meta) : []);
+    console.log('PAGARME CART ITEMS:', JSON.stringify(paymentLink?.cart_settings?.items || [], null, 2));
 
-    console.log('PAGARME META FINAL:', JSON.stringify({
-      has_shopify_items: !!(meta && meta.shopify_items),
-      shopify_items_length: (() => { try { const p = JSON.parse(meta?.shopify_items || '[]'); return p.length; } catch(e) { return 0; } })(),
-      meta_keys: meta ? Object.keys(meta) : [],
-      payment_link_meta_keys: paymentLinkMeta ? Object.keys(paymentLinkMeta) : []
-    }, null, 2));
+    // Itens do cart_settings do payment link — fonte mais confiável
+    // A Pagar.me sempre retorna os itens com name, description (tamanho) e code (variant_id)
+    const cartSettingsItems = Array.isArray(paymentLink?.cart_settings?.items)
+      ? paymentLink.cart_settings.items.filter(function(item) {
+          const title = String(item?.name || '').toLowerCase();
+          return !title.startsWith('frete') && !title.startsWith('ajuste');
+        })
+      : [];
 
     const pagarmeItems = getPagarmeItems(data, fetchedOrder);
-    const shopifyItems = parseShopifyItems(meta);
 
     const shopifyStoreDomain = requiredEnv('SHOPIFY_STORE_DOMAIN');
     const shopifyApiVersion = process.env.SHOPIFY_API_VERSION || '2024-10';
@@ -604,8 +597,37 @@ export default async function handler(req, res) {
 
     let productLineItems = [];
 
-    if (shopifyItems.length) {
-      productLineItems = buildLineItemsFromShopify(shopifyItems);
+    if (cartSettingsItems.length) {
+      // Usa os itens do cart_settings: tem name (título), description (tamanho) e code (variant_id)
+      productLineItems = cartSettingsItems.map(function(item) {
+        const variantId = Number(item?.code || 0);
+        const tamanho = String(item?.description || '').trim();
+        const titulo = String(item?.name || 'Produto NEWER').trim();
+        const quantidade = Math.max(1, Number(item?.default_quantity || 1));
+        const preco = centsToMoney(Number(item?.amount || 0));
+
+        const lineItem = {
+          quantity: quantidade,
+          requires_shipping: true,
+          taxable: false
+        };
+
+        if (variantId && !Number.isNaN(variantId)) {
+          // Com variant_id: Shopify vincula ao produto real — foto e variante aparecem automaticamente
+          lineItem.variant_id = variantId;
+        } else {
+          // Sem variant_id: item manual com título e preço
+          lineItem.title = titulo;
+          lineItem.price = preco;
+        }
+
+        // Sempre adiciona o tamanho nas properties se existir e for diferente do título
+        if (tamanho && tamanho.toLowerCase() !== titulo.toLowerCase()) {
+          lineItem.properties = [{ name: 'Tamanho', value: tamanho }];
+        }
+
+        return lineItem;
+      });
     } else if (pagarmeItems.length) {
       productLineItems = buildLineItemsFromPagarme(pagarmeItems);
     }
