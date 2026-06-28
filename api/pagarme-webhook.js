@@ -386,29 +386,37 @@ function buildLineItemsFromShopify(shopifyItems) {
     let properties = normalizeProperties(item.properties);
     const unitPrice = Number(item.unit_price ?? item.price ?? 0);
     const iconsSize = getIconsSize(item);
+    const variantId = Number(item.variant_id || item.id || 0);
 
-    if (isIconsItem(item) && iconsSize) {
+    if (iconsSize) {
       properties = upsertProperty(properties, 'Tamanho', iconsSize);
     }
 
+    if (item.image) {
+      properties = upsertProperty(properties, '_imagem_produto', item.image);
+    }
+
     const lineItem = {
-      title: item.title || item.product_title || 'Produto NEWER',
       quantity: Number(item.quantity || 1),
-      price: unitPrice.toFixed(2),
       requires_shipping: true,
       taxable: false
     };
 
-    if (item.variant_title || iconsSize) {
-      lineItem.variant_title = item.variant_title || iconsSize;
-    }
-
-    if (item.variant_id) {
-      lineItem.variant_id = Number(item.variant_id);
-    }
-
-    if (item.sku) {
-      lineItem.sku = String(item.sku);
+    // IMPORTANTE:
+    // Quando tem variant_id, a Shopify vincula o item ao produto real.
+    // Assim aparecem foto, variação/tamanho e vínculo com estoque/produto.
+    // Se NÃO tiver variant_id, cai como item manual.
+    if (variantId && !Number.isNaN(variantId)) {
+      lineItem.variant_id = variantId;
+    } else {
+      lineItem.title = item.title || item.product_title || 'Produto NEWER';
+      lineItem.price = unitPrice.toFixed(2);
+      if (item.variant_title || iconsSize) {
+        lineItem.variant_title = item.variant_title || iconsSize;
+      }
+      if (item.sku) {
+        lineItem.sku = String(item.sku);
+      }
     }
 
     if (properties.length) {
@@ -425,13 +433,26 @@ function buildLineItemsFromPagarme(pagarmeItems) {
       return !isShippingTitle(pagarmeItemTitle(item));
     })
     .map(function (item) {
-      return {
-        title: pagarmeItemTitle(item),
+      const variantId = Number(item?.code || item?.variant_id || item?.metadata?.variant_id || 0);
+      const lineItem = {
         quantity: pagarmeItemQuantity(item),
-        price: centsToMoney(pagarmeItemAmount(item)),
         requires_shipping: true,
         taxable: false
       };
+
+      if (variantId && !Number.isNaN(variantId)) {
+        lineItem.variant_id = variantId;
+      } else {
+        lineItem.title = pagarmeItemTitle(item);
+        lineItem.price = centsToMoney(pagarmeItemAmount(item));
+      }
+
+      const description = pick(item?.description, item?.metadata?.variant_title, '');
+      if (description) {
+        lineItem.properties = [{ name: 'Tamanho', value: description }];
+      }
+
+      return lineItem;
     });
 }
 
