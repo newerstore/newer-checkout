@@ -188,6 +188,79 @@ function calculateTotal(body, shopifyItems, shippingPrice) {
   return Math.max(0, itemsTotal + Number(shippingPrice || 0) - discount);
 }
 
+
+function buildPagarmeCartItems(shopifyItems, shippingName, shippingPrice, totalCents, orderCode) {
+  const items = Array.isArray(shopifyItems) ? shopifyItems : [];
+  const productSubtotal = items.reduce(function (sum, item) {
+    return sum + Number(item.unit_price || item.price || 0) * Number(item.quantity || 1);
+  }, 0);
+
+  const shippingCents = toCents(shippingPrice);
+  const targetProductCents = Math.max(0, Number(totalCents || 0) - shippingCents);
+  const discountFactor = productSubtotal > 0 ? (targetProductCents / Math.round(productSubtotal * 100)) : 1;
+
+  let cartItems = items.map(function (item) {
+    const quantity = Math.max(1, Number(item.quantity || 1));
+    const originalUnitCents = toCents(item.unit_price || item.price || 0);
+    const adjustedUnitCents = Math.max(100, Math.round(originalUnitCents * discountFactor));
+    const size = item.variant_title || item.tamanho || item.size || '';
+
+    return {
+      amount: adjustedUnitCents,
+      name: String(item.title || item.product_title || 'Produto NEWER').slice(0, 256),
+      description: String(size || item.sku || '').slice(0, 256),
+      default_quantity: quantity
+    };
+  });
+
+  if (!cartItems.length) {
+    cartItems = [
+      {
+        amount: Math.max(100, Number(totalCents || 0) - shippingCents),
+        name: `Pedido NEWER STORE ${orderCode}`,
+        description: `Pedido NEWER STORE ${orderCode}`,
+        default_quantity: 1
+      }
+    ];
+  }
+
+  if (shippingCents > 0) {
+    cartItems.push({
+      amount: shippingCents,
+      name: String(`Frete - ${shippingName || 'Entrega'}`).slice(0, 256),
+      description: 'Frete do pedido',
+      default_quantity: 1
+    });
+  }
+
+  const currentTotal = cartItems.reduce(function (sum, item) {
+    return sum + Number(item.amount || 0) * Number(item.default_quantity || 1);
+  }, 0);
+
+  const diff = Number(totalCents || 0) - currentTotal;
+
+  if (diff !== 0) {
+    const firstProduct = cartItems.find(function (item) {
+      return !String(item.name || '').toLowerCase().startsWith('frete');
+    });
+
+    if (firstProduct && Number(firstProduct.default_quantity || 1) === 1 && Number(firstProduct.amount || 0) + diff >= 100) {
+      firstProduct.amount = Number(firstProduct.amount || 0) + diff;
+    } else if (diff > 0) {
+      cartItems.push({
+        amount: diff,
+        name: 'Ajuste do pedido',
+        description: 'Ajuste de total',
+        default_quantity: 1
+      });
+    }
+  }
+
+  return cartItems.filter(function (item) {
+    return Number(item.amount || 0) > 0 && Number(item.default_quantity || 0) > 0;
+  });
+}
+
 function pagarmeAuthHeader(secretKey) {
   return `Basic ${Buffer.from(`${secretKey}:`).toString('base64')}`;
 }
@@ -381,14 +454,7 @@ export default async function handler(req, res) {
         }
       },
       cart_settings: {
-        items: [
-          {
-            amount: totalCents,
-            name: `Pedido NEWER STORE ${orderCode}`,
-            description: `Pedido NEWER STORE ${orderCode}`,
-            default_quantity: 1
-          }
-        ]
+        items: buildPagarmeCartItems(shopifyItems, shippingName, shippingPrice, totalCents, orderCode)
       }
     };
 
