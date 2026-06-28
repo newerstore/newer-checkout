@@ -210,6 +210,20 @@ function getMetadata(data, fetchedOrder) {
     data?.checkout?.metadata
   ];
 
+  const useful = possible.find(function (item) {
+    return item &&
+      typeof item === 'object' &&
+      (
+        item.shopify_items ||
+        item.customer_name ||
+        item.customer_email ||
+        item.customer_cep ||
+        item.shipping_name
+      );
+  });
+
+  if (useful) return useful;
+
   for (const item of possible) {
     if (item && typeof item === 'object' && Object.keys(item).length) return item;
   }
@@ -241,6 +255,34 @@ async function checkDuplicate(identifiers, { shopifyStoreDomain, shopifyApiVersi
   }
 
   return false;
+}
+
+
+async function enrichMetadataFromPaymentLink(meta, data, fetchedOrder) {
+  if (meta && meta.shopify_items) return meta;
+
+  const paymentLinkId = pick(
+    meta?.payment_link_id,
+    data?.metadata?.payment_link_id,
+    data?.order?.metadata?.payment_link_id,
+    fetchedOrder?.metadata?.payment_link_id
+  );
+
+  if (!paymentLinkId) return meta || {};
+
+  const paymentLink = await pagarmeGet(`/paymentlinks/${paymentLinkId}`);
+
+  const possible = [
+    paymentLink?.metadata,
+    paymentLink?.payment_link?.metadata,
+    paymentLink?.checkout?.metadata
+  ];
+
+  const useful = possible.find(function (item) {
+    return item && typeof item === 'object' && (item.shopify_items || item.customer_name || item.customer_email);
+  });
+
+  return useful || meta || {};
 }
 
 function parseShopifyItems(meta) {
@@ -446,7 +488,8 @@ export default async function handler(req, res) {
     }
 
     const fetchedOrder = orderId ? await pagarmeGet(`/orders/${orderId}`) : null;
-    const meta = getMetadata(data, fetchedOrder);
+    let meta = getMetadata(data, fetchedOrder);
+    meta = await enrichMetadataFromPaymentLink(meta, data, fetchedOrder);
     const pagarmeItems = getPagarmeItems(data, fetchedOrder);
     const shopifyItems = parseShopifyItems(meta);
 
