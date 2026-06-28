@@ -598,13 +598,25 @@ export default async function handler(req, res) {
     let productLineItems = [];
 
     if (cartSettingsItems.length) {
-      // Usa os itens do cart_settings: tem name (título), description (tamanho) e code (variant_id)
+      // Usa os itens do cart_settings do payment link.
+      // O description foi codificado pelo create-payment no formato "TAMANHO||VARIANT_ID||IMAGE_URL"
       productLineItems = cartSettingsItems.map(function(item) {
-        const variantId = Number(item?.code || 0);
-        const tamanho = String(item?.description || '').trim();
+        const rawDescription = String(item?.description || '');
         const titulo = String(item?.name || 'Produto NEWER').trim();
         const quantidade = Math.max(1, Number(item?.default_quantity || 1));
         const preco = centsToMoney(Number(item?.amount || 0));
+
+        // Decodifica o description
+        let tamanho = rawDescription;
+        let variantId = Number(item?.code || 0);
+        let imagem = '';
+
+        if (rawDescription.includes('||')) {
+          const parts = rawDescription.split('||');
+          tamanho = parts[0] || '';
+          variantId = Number(parts[1] || item?.code || 0);
+          imagem = parts[2] || '';
+        }
 
         const lineItem = {
           quantity: quantidade,
@@ -621,9 +633,16 @@ export default async function handler(req, res) {
           lineItem.price = preco;
         }
 
-        // Sempre adiciona o tamanho nas properties se existir e for diferente do título
+        // Properties: tamanho + imagem
+        const properties = [];
         if (tamanho && tamanho.toLowerCase() !== titulo.toLowerCase()) {
-          lineItem.properties = [{ name: 'Tamanho', value: tamanho }];
+          properties.push({ name: 'Tamanho', value: tamanho });
+        }
+        if (imagem) {
+          properties.push({ name: '_imagem_produto', value: imagem });
+        }
+        if (properties.length) {
+          lineItem.properties = properties;
         }
 
         return lineItem;
