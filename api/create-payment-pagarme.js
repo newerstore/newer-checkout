@@ -355,6 +355,14 @@ export default async function handler(req, res) {
     const rawShopifyItems = body.shopify_items || body.cart_items || [];
     const shopifyItems = normalizeShopifyItems(rawShopifyItems);
 
+    // LOG para diagnóstico: ver o que chega do carrinho
+    console.log('NEWER CREATE-PAYMENT ITEMS RAW:', JSON.stringify(rawShopifyItems.map(function(i) {
+      return { title: i.title, variant_id: i.variant_id, variant_title: i.variant_title, image: i.image, sku: i.sku };
+    }), null, 2));
+    console.log('NEWER CREATE-PAYMENT ITEMS NORMALIZED:', JSON.stringify(shopifyItems.map(function(i) {
+      return { title: i.title, variant_id: i.variant_id, variant_title: i.variant_title, image: i.image };
+    }), null, 2));
+
     const customerName = pick(
       body.name,
       body.nome,
