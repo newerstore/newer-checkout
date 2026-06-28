@@ -265,24 +265,59 @@ async function enrichMetadataFromPaymentLink(meta, data, fetchedOrder) {
     meta?.payment_link_id,
     data?.metadata?.payment_link_id,
     data?.order?.metadata?.payment_link_id,
-    fetchedOrder?.metadata?.payment_link_id
+    fetchedOrder?.metadata?.payment_link_id,
+    // CORRIGIDO: tenta pegar payment_link_id de outros campos da Pagar.me
+    data?.payment_link?.id,
+    data?.order?.payment_link?.id,
+    fetchedOrder?.payment_link?.id,
+    data?.charges?.[0]?.payment_link?.id
   );
 
-  if (!paymentLinkId) return meta || {};
+  // CORRIGIDO: tenta buscar o payment link pelo ID direto
+  if (paymentLinkId) {
+    const paymentLink = await pagarmeGet(`/paymentlinks/${paymentLinkId}`);
 
-  const paymentLink = await pagarmeGet(`/paymentlinks/${paymentLinkId}`);
+    const possible = [
+      paymentLink?.metadata,
+      paymentLink?.payment_link?.metadata,
+      paymentLink?.checkout?.metadata
+    ];
 
-  const possible = [
-    paymentLink?.metadata,
-    paymentLink?.payment_link?.metadata,
-    paymentLink?.checkout?.metadata
-  ];
+    const useful = possible.find(function (item) {
+      return item && typeof item === 'object' && (item.shopify_items || item.customer_name || item.customer_email);
+    });
 
-  const useful = possible.find(function (item) {
-    return item && typeof item === 'object' && (item.shopify_items || item.customer_name || item.customer_email);
-  });
+    if (useful && useful.shopify_items) return useful;
+  }
 
-  return useful || meta || {};
+  // CORRIGIDO: fallback — busca payment links pelo order_code do metadata
+  // A Pagar.me não copia shopify_items para a order automaticamente em todos os casos.
+  // Então buscamos o payment link diretamente pela listagem filtrada por order_code.
+  const orderCode = pick(
+    meta?.order_code,
+    fetchedOrder?.metadata?.order_code,
+    data?.order?.metadata?.order_code
+  );
+
+  if (orderCode) {
+    const paymentLinks = await pagarmeGet(`/paymentlinks?order_code=${encodeURIComponent(orderCode)}&page=1&size=1`);
+    const firstLink = paymentLinks?.data?.[0] || paymentLinks?.items?.[0] || null;
+
+    if (firstLink) {
+      const possible = [
+        firstLink?.metadata,
+        firstLink?.payment_link?.metadata
+      ];
+
+      const useful = possible.find(function (item) {
+        return item && typeof item === 'object' && (item.shopify_items || item.customer_name || item.customer_email);
+      });
+
+      if (useful && useful.shopify_items) return useful;
+    }
+  }
+
+  return meta || {};
 }
 
 function parseShopifyItems(meta) {
@@ -453,9 +488,15 @@ function buildLineItemsFromPagarme(pagarmeItems) {
         lineItem.price = centsToMoney(pagarmeItemAmount(item));
       }
 
-      const description = pick(item?.description, item?.metadata?.variant_title, '');
-      if (description) {
-        lineItem.properties = [{ name: 'Tamanho', value: description }];
+      // CORRIGIDO: só usa description como Tamanho se for diferente do nome/título do item
+      // Evita o bug onde o título do produto aparecia como tamanho
+      const itemName = String(item?.name || item?.title || '').trim().toLowerCase();
+      const rawDescription = String(item?.description || item?.metadata?.variant_title || '').trim();
+      const descriptionIsTitle = rawDescription.toLowerCase() === itemName;
+      const tamanho = (!descriptionIsTitle && rawDescription) ? rawDescription : '';
+
+      if (tamanho) {
+        lineItem.properties = [{ name: 'Tamanho', value: tamanho }];
       }
 
       return lineItem;
@@ -515,8 +556,34 @@ export default async function handler(req, res) {
     }
 
     const fetchedOrder = orderId ? await pagarmeGet(`/orders/${orderId}`) : null;
+
+    // CORRIGIDO: busca também a charge diretamente para garantir acesso ao payment_link_id
+    // A Pagar.me nem sempre copia o metadata do payment link para a order/charge no webhook
+    const fetchedCharge = chargeId ? await pagarmeGet(`/charges/${chargeId}`) : null;
+
     let meta = getMetadata(data, fetchedOrder);
+
+    // Tenta enriquecer o metadata com dados da charge buscada diretamente
+    if (fetchedCharge && (!meta || !meta.shopify_items)) {
+      const chargeMeta = fetchedCharge?.metadata || fetchedCharge?.last_transaction?.metadata || {};
+      if (chargeMeta && typeof chargeMeta === 'object' && Object.keys(chargeMeta).length) {
+        if (chargeMeta.shopify_items || chargeMeta.customer_name || chargeMeta.customer_email) {
+          meta = chargeMeta;
+        }
+      }
+    }
+
     meta = await enrichMetadataFromPaymentLink(meta, data, fetchedOrder);
+
+    // Log detalhado para diagnóstico do metadata
+    console.log('PAGARME META FINAL:', JSON.stringify({
+      has_shopify_items: !!(meta && meta.shopify_items),
+      shopify_items_length: (() => { try { const p = JSON.parse(meta?.shopify_items || '[]'); return p.length; } catch(e) { return 0; } })(),
+      meta_keys: meta ? Object.keys(meta) : [],
+      fetchedOrder_meta_keys: fetchedOrder?.metadata ? Object.keys(fetchedOrder.metadata) : [],
+      fetchedCharge_meta_keys: fetchedCharge?.metadata ? Object.keys(fetchedCharge.metadata) : []
+    }, null, 2));
+
     const pagarmeItems = getPagarmeItems(data, fetchedOrder);
     const shopifyItems = parseShopifyItems(meta);
 
