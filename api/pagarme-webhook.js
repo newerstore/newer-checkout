@@ -273,47 +273,34 @@ async function enrichMetadataFromPaymentLink(meta, data, fetchedOrder) {
     data?.charges?.[0]?.payment_link?.id
   );
 
-  // CORRIGIDO: tenta buscar o payment link pelo ID direto
+  // Busca o payment link pelo ID e loga a resposta completa para diagnóstico
   if (paymentLinkId) {
     const paymentLink = await pagarmeGet(`/paymentlinks/${paymentLinkId}`);
 
+    console.log('PAGARME PAYMENT LINK RESPONSE keys:', paymentLink ? Object.keys(paymentLink) : 'null');
+    console.log('PAGARME PAYMENT LINK metadata:', JSON.stringify(paymentLink?.metadata || null, null, 2));
+
+    // A Pagar.me pode retornar o metadata em vários níveis
     const possible = [
       paymentLink?.metadata,
       paymentLink?.payment_link?.metadata,
-      paymentLink?.checkout?.metadata
+      paymentLink?.checkout?.metadata,
+      paymentLink?.order?.metadata
     ];
 
-    const useful = possible.find(function (item) {
-      return item && typeof item === 'object' && (item.shopify_items || item.customer_name || item.customer_email);
+    for (const candidate of possible) {
+      if (!candidate || typeof candidate !== 'object') continue;
+      console.log('PAGARME CANDIDATE META:', JSON.stringify(candidate, null, 2));
+      if (candidate.shopify_items) return candidate;
+    }
+
+    // Mesmo sem shopify_items, retorna o metadata do payment link se tiver dados úteis
+    const anyUseful = possible.find(function(item) {
+      return item && typeof item === 'object' && Object.keys(item).length > 0;
     });
-
-    if (useful && useful.shopify_items) return useful;
-  }
-
-  // CORRIGIDO: fallback — busca payment links pelo order_code do metadata
-  // A Pagar.me não copia shopify_items para a order automaticamente em todos os casos.
-  // Então buscamos o payment link diretamente pela listagem filtrada por order_code.
-  const orderCode = pick(
-    meta?.order_code,
-    fetchedOrder?.metadata?.order_code,
-    data?.order?.metadata?.order_code
-  );
-
-  if (orderCode) {
-    const paymentLinks = await pagarmeGet(`/paymentlinks?order_code=${encodeURIComponent(orderCode)}&page=1&size=1`);
-    const firstLink = paymentLinks?.data?.[0] || paymentLinks?.items?.[0] || null;
-
-    if (firstLink) {
-      const possible = [
-        firstLink?.metadata,
-        firstLink?.payment_link?.metadata
-      ];
-
-      const useful = possible.find(function (item) {
-        return item && typeof item === 'object' && (item.shopify_items || item.customer_name || item.customer_email);
-      });
-
-      if (useful && useful.shopify_items) return useful;
+    if (anyUseful) {
+      console.log('PAGARME PAYMENT LINK meta sem shopify_items:', JSON.stringify(anyUseful, null, 2));
+      return anyUseful;
     }
   }
 
@@ -557,31 +544,38 @@ export default async function handler(req, res) {
 
     const fetchedOrder = orderId ? await pagarmeGet(`/orders/${orderId}`) : null;
 
-    // CORRIGIDO: busca também a charge diretamente para garantir acesso ao payment_link_id
-    // A Pagar.me nem sempre copia o metadata do payment link para a order/charge no webhook
-    const fetchedCharge = chargeId ? await pagarmeGet(`/charges/${chargeId}`) : null;
+    // Pega o payment_link_id de qualquer campo disponível no webhook
+    const paymentLinkId = pick(
+      data?.metadata?.payment_link_id,
+      data?.order?.metadata?.payment_link_id,
+      fetchedOrder?.metadata?.payment_link_id
+    );
 
-    let meta = getMetadata(data, fetchedOrder);
+    console.log('PAGARME PAYMENT LINK ID:', paymentLinkId);
 
-    // Tenta enriquecer o metadata com dados da charge buscada diretamente
-    if (fetchedCharge && (!meta || !meta.shopify_items)) {
-      const chargeMeta = fetchedCharge?.metadata || fetchedCharge?.last_transaction?.metadata || {};
-      if (chargeMeta && typeof chargeMeta === 'object' && Object.keys(chargeMeta).length) {
-        if (chargeMeta.shopify_items || chargeMeta.customer_name || chargeMeta.customer_email) {
-          meta = chargeMeta;
-        }
-      }
+    // Busca o payment link diretamente para obter o metadata completo com shopify_items
+    let paymentLinkMeta = null;
+    if (paymentLinkId) {
+      const paymentLink = await pagarmeGet(`/paymentlinks/${paymentLinkId}`);
+      console.log('PAGARME PAYMENT LINK FULL:', JSON.stringify(paymentLink, null, 2));
+      paymentLinkMeta = paymentLink?.metadata || null;
     }
 
-    meta = await enrichMetadataFromPaymentLink(meta, data, fetchedOrder);
+    // Usa o metadata do payment link se tiver shopify_items, senão usa o da order
+    let meta = paymentLinkMeta && paymentLinkMeta.shopify_items
+      ? paymentLinkMeta
+      : getMetadata(data, fetchedOrder);
 
-    // Log detalhado para diagnóstico do metadata
+    // Se ainda não tem shopify_items, tenta enriquecer via payment link
+    if (!meta.shopify_items) {
+      meta = await enrichMetadataFromPaymentLink(meta, data, fetchedOrder);
+    }
+
     console.log('PAGARME META FINAL:', JSON.stringify({
       has_shopify_items: !!(meta && meta.shopify_items),
       shopify_items_length: (() => { try { const p = JSON.parse(meta?.shopify_items || '[]'); return p.length; } catch(e) { return 0; } })(),
       meta_keys: meta ? Object.keys(meta) : [],
-      fetchedOrder_meta_keys: fetchedOrder?.metadata ? Object.keys(fetchedOrder.metadata) : [],
-      fetchedCharge_meta_keys: fetchedCharge?.metadata ? Object.keys(fetchedCharge.metadata) : []
+      payment_link_meta_keys: paymentLinkMeta ? Object.keys(paymentLinkMeta) : []
     }, null, 2));
 
     const pagarmeItems = getPagarmeItems(data, fetchedOrder);
