@@ -108,6 +108,10 @@ function centsToMoney(value) {
   return number.toFixed(2);
 }
 
+function pagarmeAuthHeader(secretKey) {
+  return `Basic ${Buffer.from(`${secretKey}:`).toString('base64')}`;
+}
+
 async function shopifyRequest({ shopifyStoreDomain, shopifyApiVersion, shopifyAdminToken, path, method = 'GET', body }) {
   const response = await fetch(`https://${shopifyStoreDomain}/admin/api/${shopifyApiVersion}${path}`, {
     method,
@@ -125,6 +129,33 @@ async function shopifyRequest({ shopifyStoreDomain, shopifyApiVersion, shopifyAd
   return { response, data };
 }
 
+async function pagarmeGet(path) {
+  const secretKey = process.env.PAGARME_SECRET_KEY;
+  if (!secretKey) return null;
+
+  const baseUrl = process.env.PAGARME_BASE_URL || 'https://api.pagar.me/core/v5';
+
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: 'GET',
+    headers: {
+      Authorization: pagarmeAuthHeader(secretKey),
+      Accept: 'application/json',
+      'User-Agent': 'newer-store-checkout/1.0'
+    }
+  });
+
+  const data = await response.json().catch(function () {
+    return {};
+  });
+
+  if (!response.ok) {
+    console.log('PAGARME GET ERROR:', path, response.status, JSON.stringify(data, null, 2));
+    return null;
+  }
+
+  return data;
+}
+
 function getWebhookEvent(req) {
   return String(
     req.body?.type ||
@@ -139,15 +170,21 @@ function getWebhookData(req) {
   return req.body?.data || req.body || {};
 }
 
-function getPagarmeId(data, event) {
+function getChargeId(data) {
   return String(
     data?.id ||
-    data?.code ||
-    data?.order?.id ||
-    data?.order?.code ||
     data?.charge?.id ||
     data?.charges?.[0]?.id ||
-    `${event}_${Date.now()}`
+    ''
+  ).trim();
+}
+
+function getOrderId(data) {
+  return String(
+    data?.order?.id ||
+    data?.order_id ||
+    data?.charges?.[0]?.order?.id ||
+    ''
   ).trim();
 }
 
@@ -162,10 +199,11 @@ function getOrderCode(data) {
   ).trim();
 }
 
-function getMetadata(data) {
+function getMetadata(data, fetchedOrder) {
   const possible = [
     data?.metadata,
     data?.order?.metadata,
+    fetchedOrder?.metadata,
     data?.charge?.metadata,
     data?.charges?.[0]?.metadata,
     data?.payment_link?.metadata,
@@ -173,41 +211,33 @@ function getMetadata(data) {
   ];
 
   for (const item of possible) {
-    if (item && typeof item === 'object') return item;
+    if (item && typeof item === 'object' && Object.keys(item).length) return item;
   }
 
   return {};
 }
 
-function isPaidEvent(event, data) {
-  const status = String(data?.status || data?.order?.status || data?.charges?.[0]?.status || '').toLowerCase();
-
-  return (
-    event === 'order.paid' ||
-    event === 'charge.paid' ||
-    event === 'payment-link.finished' ||
-    status === 'paid'
-  );
-}
-
-async function checkDuplicate(identifier, { shopifyStoreDomain, shopifyApiVersion, shopifyAdminToken }) {
-  const id = String(identifier).trim();
+async function checkDuplicate(identifiers, { shopifyStoreDomain, shopifyApiVersion, shopifyAdminToken }) {
+  const ids = Array.from(new Set((Array.isArray(identifiers) ? identifiers : [identifiers])
+    .map(function (id) { return String(id || '').trim(); })
+    .filter(Boolean)));
 
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt > 0) {
       await new Promise(r => setTimeout(r, 1500));
     }
 
-    const result = await shopifyRequest({
-      shopifyStoreDomain,
-      shopifyApiVersion,
-      shopifyAdminToken,
-      path: `/orders.json?status=any&source_identifier=pagarme_${encodeURIComponent(id)}&fields=id,source_identifier&limit=5`
-    });
+    for (const id of ids) {
+      const result = await shopifyRequest({
+        shopifyStoreDomain,
+        shopifyApiVersion,
+        shopifyAdminToken,
+        path: `/orders.json?status=any&source_identifier=${encodeURIComponent(id)}&fields=id,source_identifier&limit=5`
+      });
 
-    const found = Array.isArray(result.data.orders) && result.data.orders.length > 0;
-
-    if (found) return true;
+      const found = Array.isArray(result.data.orders) && result.data.orders.length > 0;
+      if (found) return true;
+    }
   }
 
   return false;
@@ -226,6 +256,43 @@ function parseShopifyItems(meta) {
   }
 }
 
+function getPagarmeItems(data, fetchedOrder) {
+  const possible = [
+    data?.order?.items,
+    data?.items,
+    fetchedOrder?.items
+  ];
+
+  for (const item of possible) {
+    if (Array.isArray(item) && item.length) return item;
+  }
+
+  return [];
+}
+
+function isShippingTitle(title) {
+  const clean = String(title || '').toLowerCase().trim();
+  return clean.startsWith('frete') || clean.includes(' entrega');
+}
+
+function pagarmeItemTitle(item) {
+  return pick(item?.name, item?.description, item?.title, item?.code, 'Produto NEWER');
+}
+
+function pagarmeItemQuantity(item) {
+  return Math.max(1, Number(item?.quantity || item?.default_quantity || 1));
+}
+
+function pagarmeItemAmount(item) {
+  return Number(
+    item?.amount ||
+    item?.unit_amount ||
+    item?.pricing_scheme?.price ||
+    item?.price ||
+    0
+  );
+}
+
 function getPaidAmount(data) {
   return (
     data?.amount ||
@@ -237,6 +304,110 @@ function getPaidAmount(data) {
   );
 }
 
+function getCustomer(data, fetchedOrder) {
+  return data?.customer || data?.order?.customer || fetchedOrder?.customer || {};
+}
+
+function getAddress(customer, meta) {
+  const addr = customer?.address || {};
+
+  const line1 = pick(addr.line_1, addr.line1, '');
+  const street = pick(meta.customer_address, addr.street, line1.split(',')[1], line1);
+  const number = pick(meta.customer_number, addr.number, line1.split(',')[0]);
+
+  return {
+    street,
+    number,
+    complement: pick(meta.customer_complement, addr.line_2, addr.line2, addr.complement),
+    district: pick(meta.customer_district, addr.neighborhood, addr.district),
+    city: pick(meta.customer_city, addr.city),
+    state: pick(meta.customer_state, addr.state),
+    cep: pick(meta.customer_cep, addr.zip_code, addr.zipcode, addr.zip),
+    country: 'Brazil'
+  };
+}
+
+function getPhone(customer, meta) {
+  const mobile = customer?.phones?.mobile_phone || {};
+  const home = customer?.phones?.home_phone || {};
+  const full = pick(
+    meta.customer_phone,
+    `${mobile.area_code || ''}${mobile.number || ''}`,
+    `${home.area_code || ''}${home.number || ''}`
+  );
+
+  return String(full || '').replace(/\D/g, '');
+}
+
+function buildLineItemsFromShopify(shopifyItems) {
+  return shopifyItems.map(function (item) {
+    let properties = normalizeProperties(item.properties);
+    const unitPrice = Number(item.unit_price ?? item.price ?? 0);
+    const iconsSize = getIconsSize(item);
+
+    if (isIconsItem(item) && iconsSize) {
+      properties = upsertProperty(properties, 'Tamanho', iconsSize);
+    }
+
+    const lineItem = {
+      title: item.title || item.product_title || 'Produto NEWER',
+      quantity: Number(item.quantity || 1),
+      price: unitPrice.toFixed(2),
+      requires_shipping: true,
+      taxable: false
+    };
+
+    if (item.variant_title || iconsSize) {
+      lineItem.variant_title = item.variant_title || iconsSize;
+    }
+
+    if (item.variant_id) {
+      lineItem.variant_id = Number(item.variant_id);
+    }
+
+    if (item.sku) {
+      lineItem.sku = String(item.sku);
+    }
+
+    if (properties.length) {
+      lineItem.properties = properties;
+    }
+
+    return lineItem;
+  });
+}
+
+function buildLineItemsFromPagarme(pagarmeItems) {
+  return pagarmeItems
+    .filter(function (item) {
+      return !isShippingTitle(pagarmeItemTitle(item));
+    })
+    .map(function (item) {
+      return {
+        title: pagarmeItemTitle(item),
+        quantity: pagarmeItemQuantity(item),
+        price: centsToMoney(pagarmeItemAmount(item)),
+        requires_shipping: true,
+        taxable: false
+      };
+    });
+}
+
+function getShippingFromPagarmeItems(pagarmeItems) {
+  const shippingItem = pagarmeItems.find(function (item) {
+    return isShippingTitle(pagarmeItemTitle(item));
+  });
+
+  if (!shippingItem) {
+    return { title: 'Frete', price: 0 };
+  }
+
+  return {
+    title: pagarmeItemTitle(shippingItem),
+    price: Number(centsToMoney(pagarmeItemAmount(shippingItem)))
+  };
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST' && req.method !== 'GET') {
     return res.status(405).json({ success: false, message: 'Use POST ou GET.' });
@@ -245,38 +416,54 @@ export default async function handler(req, res) {
   try {
     const event = getWebhookEvent(req);
     const data = getWebhookData(req);
-    const pagarmeId = getPagarmeId(data, event);
+    const chargeId = getChargeId(data);
+    const orderId = getOrderId(data);
     const orderCode = getOrderCode(data);
-    const meta = getMetadata(data);
 
     console.log('PAGARME WEBHOOK RECEBIDO:', JSON.stringify({
       method: req.method,
       query: req.query,
       event,
-      pagarmeId,
+      chargeId,
+      orderId,
       orderCode,
       body: req.body
     }, null, 2));
 
-    if (!event) {
-      return res.status(200).json({ success: true, ignored: true, message: 'Evento sem type/event.' });
+    // IMPORTANTE: só cria pedido Shopify quando a cobrança for paga.
+    // Eventos de pedido e payment-link são ignorados para evitar duplicação.
+    if (event !== 'charge.paid') {
+      return res.status(200).json({
+        success: true,
+        ignored: true,
+        event,
+        status: data?.status || ''
+      });
     }
 
-    if (!isPaidEvent(event, data)) {
-      return res.status(200).json({ success: true, ignored: true, event, status: data?.status || '' });
+    if (!chargeId) {
+      return res.status(200).json({ success: false, message: 'charge.paid sem charge id' });
     }
+
+    const fetchedOrder = orderId ? await pagarmeGet(`/orders/${orderId}`) : null;
+    const meta = getMetadata(data, fetchedOrder);
+    const pagarmeItems = getPagarmeItems(data, fetchedOrder);
+    const shopifyItems = parseShopifyItems(meta);
 
     const shopifyStoreDomain = requiredEnv('SHOPIFY_STORE_DOMAIN');
     const shopifyApiVersion = process.env.SHOPIFY_API_VERSION || '2024-10';
     const shopifyAdminToken = requiredEnv('SHOPIFY_ADMIN_TOKEN');
 
     const shopifyConfig = { shopifyStoreDomain, shopifyApiVersion, shopifyAdminToken };
-    const uniqueIdentifier = orderCode || pagarmeId;
+    const sourceIdentifiers = [
+      `pagarme_${chargeId}`,
+      orderCode ? `pagarme_${orderCode}` : ''
+    ].filter(Boolean);
 
-    const isDuplicate = await checkDuplicate(uniqueIdentifier, shopifyConfig);
+    const isDuplicate = await checkDuplicate(sourceIdentifiers, shopifyConfig);
 
     if (isDuplicate) {
-      console.log('PEDIDO PAGARME DUPLICADO BLOQUEADO:', uniqueIdentifier);
+      console.log('PEDIDO PAGARME DUPLICADO BLOQUEADO:', sourceIdentifiers);
       return res.status(200).json({
         success: true,
         duplicated: true,
@@ -284,75 +471,53 @@ export default async function handler(req, res) {
       });
     }
 
-    const shopifyItems = parseShopifyItems(meta);
+    let productLineItems = [];
 
-    if (!shopifyItems.length) {
-      console.log('ATENÇÃO: metadata.shopify_items não encontrado no webhook da Pagar.me.');
+    if (shopifyItems.length) {
+      productLineItems = buildLineItemsFromShopify(shopifyItems);
+    } else if (pagarmeItems.length) {
+      productLineItems = buildLineItemsFromPagarme(pagarmeItems);
     }
 
-    const productLineItems = shopifyItems.length
-      ? shopifyItems.map(function (item) {
-          let properties = normalizeProperties(item.properties);
-          const unitPrice = Number(item.unit_price ?? item.price ?? 0);
-          const iconsSize = getIconsSize(item);
+    if (!productLineItems.length) {
+      productLineItems = [
+        {
+          title: 'Pedido NEWER',
+          quantity: 1,
+          price: centsToMoney(getPaidAmount(data)),
+          requires_shipping: true,
+          taxable: false
+        }
+      ];
+    }
 
-          if (isIconsItem(item) && iconsSize) {
-            properties = upsertProperty(properties, 'Tamanho', iconsSize);
-          }
-
-          const lineItem = {
-            title: item.title || item.product_title || 'Produto NEWER',
-            quantity: Number(item.quantity || 1),
-            price: unitPrice.toFixed(2),
-            requires_shipping: true,
-            taxable: false
-          };
-
-          if (item.variant_title || iconsSize) {
-            lineItem.variant_title = item.variant_title || iconsSize;
-          }
-
-          if (item.variant_id) {
-            lineItem.variant_id = Number(item.variant_id);
-          }
-
-          if (item.sku) {
-            lineItem.sku = String(item.sku);
-          }
-
-          if (properties.length) {
-            lineItem.properties = properties;
-          }
-
-          return lineItem;
-        })
-      : [
-          {
-            title: 'Pedido NEWER',
-            quantity: 1,
-            price: centsToMoney(getPaidAmount(data)),
-            requires_shipping: true,
-            taxable: false
-          }
-        ];
-
-    const shippingPrice = Number(meta.shipping_price || 0);
-
-    const customerName = meta.customer_name || data?.customer?.name || data?.order?.customer?.name || '';
+    const customer = getCustomer(data, fetchedOrder);
+    const customerName = pick(meta.customer_name, customer?.name, '');
     const nameParts = customerName.trim().split(' ').filter(Boolean);
     const firstName = nameParts.shift() || customerName || 'Cliente';
     const lastName = nameParts.join(' ') || '.';
 
+    const parsedAddress = getAddress(customer, meta);
+    const customerPhone = getPhone(customer, meta);
+    const customerEmail = pick(meta.customer_email, customer?.email, '');
+    const customerCpf = pick(meta.customer_cpf, customer?.document, '');
+
+    const shippingFromItems = getShippingFromPagarmeItems(pagarmeItems);
+    const shippingPrice = Number(meta.shipping_price || shippingFromItems.price || 0);
+    const shippingTitle = pick(meta.shipping_name, shippingFromItems.title, 'Frete');
+    const shippingServiceId = meta.shipping_service_id || null;
+    const shippingCode = shippingServiceId ? `melhorenvio_${shippingServiceId}` : shippingTitle;
+
     const address = {
       first_name: firstName,
       last_name: lastName,
-      address1: `${meta.customer_address || ''}, ${meta.customer_number || ''}`.trim(),
-      address2: meta.customer_complement || '',
-      city: meta.customer_city || '',
-      province: meta.customer_state || '',
+      address1: `${parsedAddress.street || ''}, ${parsedAddress.number || ''}`.trim(),
+      address2: parsedAddress.complement || '',
+      city: parsedAddress.city || '',
+      province: parsedAddress.state || '',
       country: 'Brazil',
-      zip: meta.customer_cep || '',
-      phone: meta.customer_phone || ''
+      zip: parsedAddress.cep || '',
+      phone: customerPhone || ''
     };
 
     const paymentMethod =
@@ -361,53 +526,52 @@ export default async function handler(req, res) {
       data?.last_transaction?.transaction_type ||
       '';
 
-    const shippingServiceId = meta.shipping_service_id || null;
-    const shippingCode = shippingServiceId ? `melhorenvio_${shippingServiceId}` : (meta.shipping_name || 'Frete');
-
     const amount = centsToMoney(getPaidAmount(data));
 
     const noteLines = [
-      `Pagar.me ID: ${pagarmeId}`,
+      `Pagar.me Charge ID: ${chargeId}`,
+      `Pagar.me Order ID: ${orderId}`,
       `Pagar.me Order Code: ${orderCode}`,
       `Evento Pagar.me: ${event}`,
       `Forma de pagamento: ${paymentMethod}`,
-      `Cliente: ${meta.customer_name || ''}`,
-      `CPF: ${meta.customer_cpf || ''}`,
-      `Telefone: ${meta.customer_phone || ''}`,
-      `CEP: ${meta.customer_cep || ''}`,
-      `Endereço: ${meta.customer_address || ''}, ${meta.customer_number || ''}`,
-      `Complemento: ${meta.customer_complement || ''}`,
-      `Bairro: ${meta.customer_district || ''}`,
-      `Cidade/UF: ${meta.customer_city || ''}/${meta.customer_state || ''}`,
-      `Frete: ${meta.shipping_name || ''} - R$ ${shippingPrice.toFixed(2)}`,
+      `Cliente: ${customerName || ''}`,
+      `CPF: ${customerCpf || ''}`,
+      `Telefone: ${customerPhone || ''}`,
+      `CEP: ${parsedAddress.cep || ''}`,
+      `Endereço: ${parsedAddress.street || ''}, ${parsedAddress.number || ''}`,
+      `Complemento: ${parsedAddress.complement || ''}`,
+      `Bairro: ${parsedAddress.district || ''}`,
+      `Cidade/UF: ${parsedAddress.city || ''}/${parsedAddress.state || ''}`,
+      `Frete: ${shippingTitle || ''} - R$ ${shippingPrice.toFixed(2)}`,
       `Cupom: ${meta.coupon_code || ''}`,
       `Desconto: R$ ${Number(meta.discount_amount || 0).toFixed(2)}`
     ];
 
     const orderPayload = {
       order: {
-        email: meta.customer_email || data?.customer?.email || data?.order?.customer?.email || '',
+        email: customerEmail,
         financial_status: 'paid',
         fulfillment_status: null,
         source_name: 'Pagar.me',
-        source_identifier: `pagarme_${uniqueIdentifier}`,
+        source_identifier: `pagarme_${chargeId}`,
         note: noteLines.join('\n'),
         tags: 'Pagar.me, NEWER Checkout',
         note_attributes: [
-          { name: 'pagarme_id', value: String(pagarmeId || '') },
+          { name: 'pagarme_charge_id', value: String(chargeId || '') },
+          { name: 'pagarme_order_id', value: String(orderId || '') },
           { name: 'pagarme_order_code', value: String(orderCode || '') },
-          { name: 'customer_name', value: meta.customer_name || '' },
-          { name: 'customer_email', value: meta.customer_email || data?.customer?.email || '' },
-          { name: 'customer_phone', value: meta.customer_phone || '' },
-          { name: 'customer_cpf', value: meta.customer_cpf || '' },
-          { name: 'customer_cep', value: meta.customer_cep || '' },
-          { name: 'customer_address', value: meta.customer_address || '' },
-          { name: 'customer_number', value: meta.customer_number || '' },
-          { name: 'customer_complement', value: meta.customer_complement || '' },
-          { name: 'customer_district', value: meta.customer_district || '' },
-          { name: 'customer_city', value: meta.customer_city || '' },
-          { name: 'customer_state', value: meta.customer_state || '' },
-          { name: 'shipping_name', value: meta.shipping_name || '' },
+          { name: 'customer_name', value: customerName || '' },
+          { name: 'customer_email', value: customerEmail || '' },
+          { name: 'customer_phone', value: customerPhone || '' },
+          { name: 'customer_cpf', value: customerCpf || '' },
+          { name: 'customer_cep', value: parsedAddress.cep || '' },
+          { name: 'customer_address', value: parsedAddress.street || '' },
+          { name: 'customer_number', value: parsedAddress.number || '' },
+          { name: 'customer_complement', value: parsedAddress.complement || '' },
+          { name: 'customer_district', value: parsedAddress.district || '' },
+          { name: 'customer_city', value: parsedAddress.city || '' },
+          { name: 'customer_state', value: parsedAddress.state || '' },
+          { name: 'shipping_name', value: shippingTitle || '' },
           { name: 'shipping_price', value: shippingPrice.toFixed(2) },
           { name: 'shipping_service_id', value: String(shippingServiceId || '') },
           { name: 'coupon_code', value: meta.coupon_code || '' },
@@ -417,9 +581,9 @@ export default async function handler(req, res) {
         line_items: productLineItems,
         shipping_lines: [
           {
-            title: meta.shipping_name || 'Frete',
+            title: shippingTitle || 'Frete',
             price: shippingPrice.toFixed(2),
-            code: shippingCode
+            code: shippingCode || 'Frete'
           }
         ],
         shipping_address: address,
@@ -427,7 +591,7 @@ export default async function handler(req, res) {
         customer: {
           first_name: firstName,
           last_name: lastName,
-          email: meta.customer_email || data?.customer?.email || data?.order?.customer?.email || ''
+          email: customerEmail
         },
         transactions: [
           {
