@@ -209,6 +209,7 @@ function buildPagarmeCartItems(shopifyItems, shippingName, shippingPrice, totalC
       amount: adjustedUnitCents,
       name: String(item.title || item.product_title || 'Produto NEWER').slice(0, 256),
       description: String(size || item.sku || '').slice(0, 256),
+      code: String(item.variant_id || item.id || ''),
       default_quantity: quantity
     };
   });
