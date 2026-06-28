@@ -261,6 +261,67 @@ function buildPagarmeCartItems(shopifyItems, shippingName, shippingPrice, totalC
   });
 }
 
+
+function onlyDigits(value) {
+  return String(value || '').replace(/\D/g, '');
+}
+
+function splitPhone(phone) {
+  const digits = onlyDigits(phone);
+  const withoutCountry = digits.startsWith('55') && digits.length > 11 ? digits.slice(2) : digits;
+  return {
+    area_code: withoutCountry.slice(0, 2) || '11',
+    number: withoutCountry.slice(2) || withoutCountry || '999999999'
+  };
+}
+
+function buildPagarmeCustomerSettings({
+  customerName,
+  customerEmail,
+  customerPhone,
+  customerCpf,
+  customerCep,
+  customerAddress,
+  customerNumber,
+  customerComplement,
+  customerDistrict,
+  customerCity,
+  customerState
+}) {
+  const phone = splitPhone(customerPhone);
+  const document = onlyDigits(customerCpf);
+  const zipCode = onlyDigits(customerCep);
+
+  const customer = {
+    name: customerName || 'Cliente NEWER',
+    email: customerEmail || 'cliente@newer-store.com',
+    type: 'individual',
+    document: document || undefined,
+    phones: {
+      mobile_phone: {
+        country_code: '55',
+        area_code: phone.area_code,
+        number: phone.number
+      }
+    }
+  };
+
+  const address = {
+    country: 'BR',
+    state: customerState || 'SP',
+    city: customerCity || 'São Paulo',
+    zip_code: zipCode || '01001000',
+    line_1: `${customerNumber || '0'}, ${customerAddress || 'Endereço não informado'}, ${customerDistrict || 'Bairro não informado'}`,
+    line_2: customerComplement || ''
+  };
+
+  return {
+    customer,
+    billing_address: address,
+    shipping_address: address
+  };
+}
+
 function pagarmeAuthHeader(secretKey) {
   return `Basic ${Buffer.from(`${secretKey}:`).toString('base64')}`;
 }
@@ -432,6 +493,20 @@ export default async function handler(req, res) {
       });
     }
 
+    const customerSettings = buildPagarmeCustomerSettings({
+      customerName,
+      customerEmail,
+      customerPhone,
+      customerCpf,
+      customerCep,
+      customerAddress,
+      customerNumber,
+      customerComplement,
+      customerDistrict,
+      customerCity,
+      customerState
+    });
+
     const payload = {
       is_building: false,
       name: `NEWER STORE ${orderCode}`.slice(0, 64),
@@ -443,6 +518,7 @@ export default async function handler(req, res) {
       // A Pagar.me v5 costuma preservar metadata nos objetos gerados a partir do checkout.
       // O webhook usa esses dados para criar o pedido completo na Shopify.
       metadata,
+      customer_settings: customerSettings,
       payment_settings: {
         accepted_payment_methods: ['credit_card', 'pix'],
         credit_card_settings: {
